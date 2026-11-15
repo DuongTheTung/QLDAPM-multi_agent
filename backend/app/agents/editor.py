@@ -18,8 +18,8 @@ class EditorAgent(BaseAgent):
 NGHIÊM TRỌNG làm sai nội dung, không an toàn, thiếu trang/cảnh, hoặc đổi ngoại hình. Lỗi nhỏ phải ghi
 vào minor_notes và vẫn PASS. Nếu REVISE, chỉ định đúng MỘT agent: writer (cốt truyện/lời thoại),
 designer (anchor/ngoại hình/style), artist (prompt/ảnh không theo kịch bản). Không tự sửa kịch bản hay
-vẽ lại ảnh. Nếu trên 25% lượt thoại dưới 6 từ, câu cụt hoặc không truyền đạt đủ ý thì coi là lỗi
-nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫn được chấp nhận."""
+vẽ lại ảnh. Nếu đoạn kể theo trang bị thiếu, quá ngắn hoặc không đủ diễn biến để hiểu câu chuyện thì
+coi là lỗi nghiêm trọng của writer."""
 
     SCHEMA = """{
       "verdict": "PASS|REVISE",
@@ -125,7 +125,7 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
 
     async def _layout(self, state: ComicState) -> ComicState:
         self.started(state, "layout", 92)
-        self.step(state, "editor_layout", "Biên tập đang gắn bóng thoại và dàn trang")
+        self.step(state, "editor_layout", "Biên tập đang ghép tranh với khối văn bản riêng")
         final_dir = self.project_dir(state) / "final"
         final_cover = self.layout.finalize_cover(
             Path(state["cover_image"]), state["title"], final_dir / "cover.png"
@@ -145,12 +145,11 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
             raise ValueError(f"Bìa hoàn thiện chưa đạt: {cover_test.get('summary', '')}")
         final_pages: list[Path] = []
         script_pages = state["script"].get("pages", [])
-        self.step(state, "editor_pages", "Biên tập đang kiểm tra từng trang sau khi gắn thoại")
+        self.step(state, "editor_pages", "Biên tập đang kiểm tra từng trang tranh và đoạn kể")
         for index, (raw, page) in enumerate(zip(state["page_images"], script_pages), start=1):
             output = final_dir / f"page-{index:02d}.png"
-            prompt_info = state.get("page_prompts", [])[index - 1] if index <= len(state.get("page_prompts", [])) else {}
-            layout_page = {**page, "dialogue_zone": prompt_info.get("dialogue_zone", "top")}
-            self.layout.add_dialogue(Path(raw), layout_page, output)
+            layout_page = {**page}
+            self.layout.compose_story_page(Path(raw), layout_page, output)
             final_pages.append(output)
             artifact_id = self.db.add_artifact(
                 state["project_id"], self.agent_id, "page_final",
@@ -162,7 +161,7 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
                 {"artifact_ids": [artifact_id], "page": index, "unit_key": f"editor_page_{index}"},
             )
             result = await self.quality_gate(
-                state, "editor_pages", f"Trang {index} sau dàn thoại",
+                state, "editor_pages", f"Trang {index} sau dàn tranh và chữ",
                 content=layout_page, image_path=output, artifact_ids=[artifact_id],
             )
             if result.get("verdict") == "REVISE":
@@ -172,6 +171,7 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
         metadata = {
             "title": state["title"], "project_id": state["project_id"],
             "lesson": state["script"].get("lesson", ""), "review": state.get("review", {}),
+            "layout": "minh họa bên trái, đoạn kể bên phải; không dùng bóng thoại",
             "model_usage": state.get("model_usage", []),
         }
         self.layout.make_pdf(final_cover, final_pages, destination, metadata)
@@ -195,7 +195,7 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
             state, "artifact_ready", "PDF truyện tranh đã sẵn sàng",
             {"path": str(destination), "artifact_ids": [pdf_id]},
         )
-        self.completed(state, "Đã gắn bóng thoại, hoàn thiện bìa và ghép PDF")
+        self.completed(state, "Đã ghép tranh với đoạn kể riêng, hoàn thiện bìa và xuất PDF")
         return {**state, "final_pdf": str(destination), "stage": "finalized", "completed": True}
 
     @staticmethod
@@ -205,12 +205,9 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
         prompts = state.get("page_prompts", [])
         images = state.get("page_images", [])
         bible = state.get("character_bible", {})
-        all_dialogues = [
-            dialogue for page in script_pages for dialogue in page.get("dialogues", [])
-        ]
-        short_dialogues = [
-            dialogue for dialogue in all_dialogues
-            if len(str(dialogue.get("text", "")).split()) < 6
+        short_story_pages = [
+            page for page in script_pages
+            if len(LayoutService._story_text(page).split()) < 35
         ]
         issues = []
         target = "none"
@@ -220,12 +217,12 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
                 "category": "page_count", "reason": "Kịch bản không đủ số trang đã khóa",
                 "evidence": f"expected={expected}, actual={len(script_pages)}",
             })
-        elif all_dialogues and len(short_dialogues) / len(all_dialogues) > 0.25:
+        elif short_story_pages:
             target = "writer"
             issues.append({
-                "category": "dialogue_quality",
-                "reason": "Quá nhiều câu thoại ngắn, cộc lốc hoặc chưa đủ ý",
-                "evidence": f"short={len(short_dialogues)}, total={len(all_dialogues)}",
+                "category": "story_text_quality",
+                "reason": "Có trang thiếu đoạn kể hoặc đoạn kể chưa đủ ý",
+                "evidence": f"short_pages={len(short_story_pages)}, total={len(script_pages)}",
             })
         elif not bible.get("style_lock") or any(
             not item.get("fixed_anchor") for item in bible.get("characters", [])

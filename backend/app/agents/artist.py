@@ -11,17 +11,17 @@ class ArtistAgent(BaseAgent):
     display_name = "Họa sĩ"
 
     SYSTEM = """Bạn là họa sĩ truyện tranh production. Nhiệm vụ duy nhất là ghép prompt cho bìa và
-từng trang từ kịch bản đã khóa cùng các anchor cố định. Không được đổi hành động, lời thoại, bối cảnh
-hay ngoại hình. Prompt trang phải yêu cầu bố cục rõ và chừa vùng sáng/trống phía trên cho bóng thoại;
-không render chữ, ký tự, watermark hoặc speech bubble trong ảnh. Sao chép nguyên văn style_lock và
-mọi fixed_anchor liên quan vào trường prompt."""
+từng trang từ kịch bản đã khóa cùng các anchor cố định. Không được đổi hành động, nội dung kể, bối
+cảnh hay ngoại hình. Tranh phải tập trung hoàn toàn vào hình ảnh và bố cục nhân vật; không cần chừa
+vùng đặt chữ vì văn bản nằm ở một cột riêng ngoài tranh. Không render chữ, ký tự, watermark hoặc
+speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anchor liên quan vào prompt."""
 
     SCHEMA = """{
       "cover": {"prompt": "prompt đầy đủ có các anchor nguyên văn", "title_area": "top"},
       "pages": [{
         "page_number": 1,
         "prompt": "prompt đầy đủ, không chữ, có style + character + setting anchors nguyên văn",
-        "dialogue_zone": "top-left|top|top-right",
+        "composition_note": "bố cục nhân vật và trọng tâm hình ảnh",
         "continuity_note": "điểm cần giữ nhất quán"
       }]
     }"""
@@ -139,7 +139,7 @@ mọi fixed_anchor liên quan vào trường prompt."""
         anchors.extend(item.get("fixed_anchor", "") for item in bible.get("settings", []))
         fixed = "\n".join(anchor for anchor in anchors if anchor)
         negative = bible.get("negative_lock", "")
-        suffix = f"\n{fixed}\nNEGATIVE LOCK: {negative}\nNo text, no letters, no watermark, no speech bubbles. Leave clean negative space at the top for dialogue."
+        suffix = f"\n{fixed}\nNEGATIVE LOCK: {negative}\nNo text, no letters, no watermark, no speech bubbles. Use the full frame for visual storytelling; no text-safe area is required."
         pack.setdefault("cover", {})["prompt"] = pack.get("cover", {}).get("prompt", "") + suffix
         for item in pack.get("pages", []):
             item["prompt"] = item.get("prompt", "") + suffix
@@ -161,7 +161,8 @@ mọi fixed_anchor liên quan vào trường prompt."""
             )
             pages.append({
                 "page_number": page.get("page_number"), "prompt": visual,
-                "dialogue_zone": "top", "continuity_note": "Preserve every locked anchor verbatim.",
+                "composition_note": "Use the full frame for the scripted action.",
+                "continuity_note": "Preserve every locked anchor verbatim.",
             })
         cover_prompt = (
             f"BOOK COVER for {state.get('title', '')}. Story premise: {script.get('logline', '')}. "

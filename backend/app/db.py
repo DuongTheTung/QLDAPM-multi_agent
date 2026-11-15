@@ -12,11 +12,11 @@ from .schemas import utcnow
 
 CORE_AGENT_SEEDS = (
     ("pm", "Tùng", "PM", "Quản lý kế hoạch, lịch, tiến độ và điều phối xử lý lỗi.", "#263f35"),
-    ("writer", "Sơn", "Biên kịch", "Viết cấu trúc truyện, phân trang và lời thoại phù hợp lứa tuổi.", "#dd5c3d"),
+    ("writer", "Sơn", "Biên kịch", "Viết cấu trúc truyện, phân trang và đoạn kể phù hợp lứa tuổi.", "#dd5c3d"),
     ("designer", "Hải", "Thiết kế nhân vật", "Khóa phong cách, nhân vật, bối cảnh và tạo ảnh tham chiếu.", "#d99b2b"),
     ("artist", "Sáng", "Họa sĩ", "Tạo prompt và minh họa bìa, từng trang theo kịch bản đã khóa.", "#426b91"),
     ("reviewer", "Minh", "Kiểm duyệt", "Kiểm tra từng đầu ra ngay khi hoàn thành và trả lỗi về đúng agent.", "#3f8178"),
-    ("editor", "Trí", "Biên tập & dàn trang", "Gắn bóng thoại, hoàn thiện bìa và xuất PDF từ nội dung đã đạt kiểm duyệt.", "#7d5c8d"),
+    ("editor", "Trí", "Biên tập & dàn trang", "Ghép tranh với khối văn bản riêng, hoàn thiện bìa và xuất PDF.", "#7d5c8d"),
 )
 
 

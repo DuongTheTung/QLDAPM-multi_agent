@@ -9,12 +9,11 @@ class WriterAgent(BaseAgent):
     display_name = "Biên kịch"
 
     SYSTEM = """Bạn là biên kịch truyện tranh thiếu nhi chuyên nghiệp. Kịch bản bắt buộc có mở,
-thắt, cao trào, kết và bài học. Chia chính xác theo từng trang. Lời thoại phải tự nhiên, phù hợp độ
-tuổi, mỗi câu ghi rõ người nói và truyền đạt một ý đầy đủ. Mỗi lượt thoại nên dài 7-22 từ, có chủ-vị
-hoặc ngữ cảnh rõ ràng; tránh câu cụt lủn như “Ừ”, “Đi thôi”, “Không đâu” nếu đứng một mình. Mỗi trang
-nên có 1-3 lượt thoại để câu chuyện đủ cảm xúc nhưng không che tranh. Mỗi trang phải mô tả hành động
-có thể vẽ được. Không đưa hướng dẫn vẽ chi tiết, không làm character design. Tôn trọng tuyệt đối
-production brief."""
+thắt, cao trào, kết và bài học. Chia chính xác theo từng trang. Mỗi trang phải có story_text là một
+đoạn văn kể chuyện hoàn chỉnh khoảng 60-110 từ, phù hợp độ tuổi, nối mạch tự nhiên với trang trước và
+đủ rõ khi đọc cạnh một tranh minh họa. Có thể đưa lời nhân vật vào đoạn kể bằng dấu ngoặc kép, nhưng
+không viết theo dạng bóng thoại rời rạc hoặc câu cụt lủn. Mỗi trang phải mô tả hành động có thể vẽ
+được. Không đưa hướng dẫn vẽ chi tiết, không làm character design. Tôn trọng production brief."""
 
     SCHEMA = """{
       "logline": "...", "theme": "...", "lesson": "...",
@@ -23,8 +22,9 @@ production brief."""
       "pages": [{
         "page_number": 1, "beat": "opening|rising_action|climax|ending",
         "setting": "...", "action": "...", "emotion": "...",
-        "dialogues": [{"speaker": "Tên nhân vật", "text": "câu đầy đủ ý, tự nhiên, 7-22 từ"}],
-        "caption": "tùy chọn hoặc rỗng"
+        "characters_present": ["Tên nhân vật xuất hiện trong tranh"],
+        "story_text": "đoạn kể hoàn chỉnh 60-110 từ; lời nói nếu có được lồng tự nhiên trong đoạn",
+        "dialogues": [{"speaker": "Tên nhân vật", "text": "câu được trích trong story_text nếu có"}]
       }]
     }"""
 
@@ -34,8 +34,8 @@ production brief."""
         feedback = state.get("feedback", "")
         prompt = (
             f"Yêu cầu gốc:\n{state['user_prompt']}\n\nProduction brief:\n{state['plan']}\n"
-            f"\nHãy viết đúng {state['plan']['page_count']} trang. Mỗi lượt thoại phải đủ ý, tự nhiên, "
-            "ưu tiên 7-22 từ; không dùng câu cộc lốc hoặc chỉ một vài từ nếu không có ngữ cảnh."
+            f"\nHãy viết đúng {state['plan']['page_count']} trang. Mỗi trang phải có story_text "
+            "khoảng 60-110 từ, kể đủ diễn biến và cảm xúc; chữ sẽ nằm ở cột riêng bên cạnh tranh."
         )
         prompt += self.expert_context(state)
         if feedback:
@@ -59,18 +59,21 @@ production brief."""
         for index, page in enumerate(pages, start=1):
             page["page_number"] = index
             page.setdefault("dialogues", [])
+            story_text = str(page.get("story_text") or "").strip()
+            if len(story_text.split()) < 35:
+                raise ValueError(f"Đoạn kể trang {index} quá ngắn hoặc chưa có story_text")
         pages_test = await self.quality_gate(
             state, "writer_pages", "Kịch bản phân trang", content={"pages": pages},
         )
         if pages_test.get("verdict") == "REVISE":
             raise ValueError(f"Phân trang chưa đạt kiểm duyệt: {pages_test.get('summary', '')}")
-        self.step(state, "writer_dialogue", "Biên kịch đang hoàn thiện và kiểm tra lời thoại")
+        self.step(state, "writer_story_text", "Biên kịch đang hoàn thiện đoạn kể cho từng trang")
         self.save_json(state, "02-script.json", script, "script")
-        dialogue_test = await self.quality_gate(
-            state, "writer_dialogue", "Lời thoại hoàn chỉnh", content={"pages": pages},
+        story_test = await self.quality_gate(
+            state, "writer_story_text", "Đoạn kể theo từng trang", content={"pages": pages},
         )
-        if dialogue_test.get("verdict") == "REVISE":
-            raise ValueError(f"Lời thoại chưa đạt kiểm duyệt: {dialogue_test.get('summary', '')}")
+        if story_test.get("verdict") == "REVISE":
+            raise ValueError(f"Đoạn kể chưa đạt kiểm duyệt: {story_test.get('summary', '')}")
         self.db.update_project(state["project_id"], stage="character_design", progress=30)
         self.completed(state, f"Đã hoàn thành kịch bản {expected} trang")
         self.event(state, "handoff", "Kịch bản đã qua Testing; bàn giao Thiết kế nhân vật", {"to": "designer"})

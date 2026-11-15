@@ -1,33 +1,35 @@
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 from backend.app.services.layout import LayoutService
 
 
-def test_layout_adds_bubbles_and_makes_pdf(tmp_path: Path):
+def test_layout_places_story_text_beside_art_and_makes_pdf(tmp_path: Path):
     raw = tmp_path / "raw.png"
     Image.new("RGB", (600, 900), "#c9d9ce").save(raw)
-    page = {"dialogues": [{"speaker": "Mèo", "text": "Mình sẽ thử thêm một lần nữa!"}]}
-    final = LayoutService().add_dialogue(raw, page, tmp_path / "final.png")
+    page = {
+        "page_number": 1,
+        "story_text": "Ngày nọ, Mèo nhỏ quyết định bước qua khu rừng để tìm người bạn đã lạc mất. " * 5,
+    }
+    final = LayoutService().compose_story_page(raw, page, tmp_path / "final.png")
     cover = LayoutService().finalize_cover(raw, "Chú mèo dũng cảm", tmp_path / "cover.png")
     sheet = LayoutService().make_contact_sheet(cover, [final], tmp_path / "sheet.jpg")
     pdf = LayoutService().make_pdf(cover, [final], tmp_path / "comic.pdf", {"title": "Test"})
-    assert final.exists() and final.stat().st_size > raw.stat().st_size
+    assert final.exists() and Image.open(final).size == (1600, 1200)
+    assert Image.open(cover).size == (1600, 1200)
     assert cover.exists() and sheet.exists()
     assert pdf.exists() and pdf.stat().st_size > 1000
 
 
-def test_safe_box_avoids_busy_character_area():
-    image = Image.new("RGB", (600, 900), "white")
-    draw = ImageDraw.Draw(image)
-    for x in range(20, 280, 12):
-        draw.line((x, 10, x, 320), fill="black", width=6)
-    gray = image.convert("L")
-    edges = gray.filter(ImageFilter.FIND_EDGES)
-
-    box = LayoutService()._find_safe_box(edges, gray, 240, 140, [], "top", 0)
-    assert box[0] >= 180  # picks the quiet center/right instead of the busy top-left
+def test_story_text_falls_back_to_legacy_script_fields():
+    page = {
+        "action": "Mèo nhỏ bước qua khu rừng.",
+        "dialogues": [{"speaker": "Mèo", "text": "Mình sẽ tìm được đường về nhà."}],
+    }
+    story = LayoutService._story_text(page)
+    assert "Mèo nhỏ bước qua khu rừng" in story
+    assert "Mình sẽ tìm được đường về nhà" in story
 
 
 def test_dialogue_wrapper_keeps_every_word():

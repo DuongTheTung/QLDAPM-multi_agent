@@ -21,7 +21,7 @@ def test_pm_builds_specific_task_and_subtask_hierarchy():
     assert len(children) == 18
     assert all(item["parent_id"] for item in children)
     assert {item["step_key"] for item in children} >= {
-        "pm_scope", "writer_dialogue", "designer_references",
+        "pm_scope", "writer_story_text", "designer_references",
         "artist_pages", "reviewer_final", "editor_pdf",
     }
     assert any("8" in item["title"] for item in children if item["agent"] == "artist")

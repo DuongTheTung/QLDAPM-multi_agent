@@ -166,7 +166,7 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
             [
                 ("01", "Dựng cấu trúc câu chuyện và bài học", "writer_structure"),
                 ("02", f"Chia nội dung thành đúng {page_count} trang", "writer_pages"),
-                ("03", "Viết và kiểm tra lời thoại đầy đủ ý", "writer_dialogue"),
+                ("03", "Viết và kiểm tra đoạn kể đầy đủ theo từng trang", "writer_story_text"),
             ],
         )
         add_group(
@@ -183,7 +183,7 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         add_group(
             "ART", f"Minh họa bìa và {page_count} trang truyện", "artist",
             script_start + 70, art_end, ["DESIGN"],
-            "Giữ nguyên kịch bản/ngoại hình và chừa vùng an toàn cho bóng thoại.",
+            "Giữ nguyên kịch bản/ngoại hình; dùng toàn khung tranh vì chữ được đặt ở cột riêng.",
             [
                 ("01", "Ghép prompt ảnh từ kịch bản và anchor", "artist_prompts"),
                 ("02", "Tạo ảnh bìa không có chữ", "artist_cover"),
@@ -203,9 +203,9 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         add_group(
             "EDITOR", "Dàn trang và xuất PDF", "editor",
             art_end + 25, art_end + 55, ["REVIEW"],
-            "Chỉ gắn bóng thoại, hoàn thiện bìa và xuất PDF từ đầu ra đã đạt kiểm duyệt.",
+            "Ghép tranh và đoạn kể thành hai vùng riêng, hoàn thiện bìa và xuất PDF.",
             [
-                ("01", "Gắn bóng thoại không che nhân vật", "editor_layout"),
+                ("01", "Ghép tranh bên trái và đoạn kể bên phải", "editor_layout"),
                 ("02", "Kiểm tra từng trang sau dàn", "editor_pages"),
                 ("03", "Hoàn thiện bìa và xuất PDF", "editor_pdf"),
             ],

@@ -76,7 +76,7 @@ function HomePage({ projects, onCreate, onOpen }: { projects: Project[]; onCreat
       <div className="home-copy">
         <p className="eyebrow">AUTONOMOUS COMIC STUDIO</p>
         <h1>Một ý tưởng.<em><span>Cả xưởng</span>{' '}<span><span className="word-fix">bắt</span> tay làm.</span></em></h1>
-        <p className="lede">Chỉ cần gửi một yêu cầu duy nhất. Năm agent sẽ tự lên lịch, viết, thiết kế, minh họa, duyệt và xuất PDF.</p>
+        <p className="lede">Chỉ cần gửi một yêu cầu duy nhất. Sáu agent sẽ tự lên lịch, viết, thiết kế, minh họa, duyệt và xuất PDF.</p>
         <button className="primary large" onClick={onCreate}><Sparkles size={18} /> {projects.length ? 'Tạo dự án mới' : 'Tạo truyện đầu tiên'}</button>
       </div>
       <div className="home-art" aria-hidden="true">
@@ -304,12 +304,13 @@ const CONTENT_LABELS: Record<string, string> = {
   theme: 'Chủ đề', lesson: 'Bài học', structure: 'Cấu trúc câu chuyện', opening: 'Mở đầu',
   rising_action: 'Thắt nút', climax: 'Cao trào', ending: 'Kết thúc', characters: 'Nhân vật',
   pages: 'Nội dung từng trang', page_number: 'Trang', beat: 'Nhịp truyện', setting: 'Bối cảnh',
-  action: 'Hành động', emotion: 'Cảm xúc', dialogues: 'Lời thoại', speaker: 'Người nói', text: 'Nội dung',
-  caption: 'Lời dẫn', role: 'Vai trò', age_or_type: 'Tuổi hoặc loài', traits: 'Tính cách',
+  action: 'Hành động', emotion: 'Cảm xúc', characters_present: 'Nhân vật trong tranh', story_text: 'Đoạn kể trên trang',
+  dialogues: 'Lời nhân vật trong đoạn kể', speaker: 'Người nói', text: 'Nội dung',
+  caption: 'Lời dẫn cũ', role: 'Vai trò', age_or_type: 'Tuổi hoặc loài', traits: 'Tính cách',
   style_lock: 'Phong cách tranh đã khóa', negative_lock: 'Những điều phải tránh', profile: 'Hồ sơ',
   fixed_anchor: 'Mô tả cố định', reference_prompt: 'Mô tả ảnh tham chiếu', settings: 'Bối cảnh cố định',
   cover: 'Bìa truyện', prompt: 'Mô tả tạo ảnh', title_area: 'Vùng đặt tên truyện',
-  dialogue_zone: 'Vùng dành cho bóng thoại', continuity_note: 'Lưu ý nhất quán', verdict: 'Kết luận',
+  composition_note: 'Lưu ý bố cục tranh', continuity_note: 'Lưu ý nhất quán', verdict: 'Kết luận',
   summary: 'Tóm tắt đánh giá', serious_issues: 'Lỗi nghiêm trọng', minor_notes: 'Ghi chú nhỏ',
   revision_agent: 'Agent cần sửa', revision_instructions: 'Yêu cầu sửa', scores: 'Điểm đánh giá',
   category: 'Nhóm lỗi', reason: 'Lý do', evidence: 'Bằng chứng', story: 'Cốt truyện',

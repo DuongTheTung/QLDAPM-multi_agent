@@ -15,7 +15,7 @@ ComicFlow là xưởng sản xuất truyện tranh tự động sử dụng **La
 - Quản lý agent bổ sung và model riêng của từng agent.
 - Quản lý model mặc định của 9Router ở cấp toàn hệ thống.
 - URL riêng cho trang chủ, từng dự án và từng chức năng; tải lại trang không mất vị trí.
-- Tạo ảnh bìa, ảnh từng trang, bóng thoại và PDF hoàn chỉnh.
+- Tạo ảnh bìa, ảnh từng trang, khối văn bản kể chuyện và PDF hoàn chỉnh.
 
 ## Workflow
 
@@ -56,11 +56,11 @@ Mỗi task hoặc sản phẩm đi qua hai trạng thái chính:
 | Agent | Trách nhiệm |
 |---|---|
 | **PM** | Phân tích yêu cầu, khóa phạm vi, lập task/subtask, dependency và lịch sản xuất. |
-| **Biên kịch** | Viết mở–thắt–cao trào–kết–bài học, chia trang và viết lời thoại đầy đủ ý. |
+| **Biên kịch** | Viết mở–thắt–cao trào–kết–bài học, chia trang và viết đoạn kể đầy đủ ý. |
 | **Thiết kế nhân vật** | Tạo hồ sơ nhân vật, khóa phong cách, anchor cố định và ảnh tham chiếu. |
-| **Họa sĩ** | Ghép prompt từ kịch bản/anchor, tạo bìa và từng trang, chừa vùng đặt bóng thoại. |
+| **Họa sĩ** | Ghép prompt từ kịch bản/anchor và tạo bìa, từng trang không chứa chữ. |
 | **Kiểm duyệt** | Kiểm tra từng đầu ra, an toàn độ tuổi, tính nhất quán và trả lỗi về đúng agent. |
-| **Biên tập & dàn trang** | Gắn bóng thoại, hoàn thiện bìa và ghép PDF từ nội dung đã đạt kiểm duyệt. |
+| **Biên tập & dàn trang** | Đặt tranh và đoạn kể ở hai vùng riêng, hoàn thiện bìa và ghép PDF. |
 
 Biên tập không thực hiện quality gate tổng thể. Việc kiểm duyệt thuộc trách nhiệm của agent **Kiểm duyệt**.
 
@@ -198,31 +198,114 @@ Khi dự án đang chạy, nội dung tin nhắn chỉ được xem. Muốn ch�
 
 Không có chức năng thay ảnh thủ công. Khi ảnh chưa đạt, agent Thiết kế nhân vật hoặc Họa sĩ sẽ tự tạo lại.
 
-## Bóng thoại và lời thoại
+## Dàn tranh và nội dung kể chuyện
 
-- Biên kịch được yêu cầu viết câu tự nhiên, đầy đủ ý, thường dài 7–22 từ.
-- Mỗi trang thường có 1–3 lượt thoại để tránh che tranh.
-- Khi dàn trang, hệ thống ưu tiên vùng ít chi tiết và vùng trống do Họa sĩ chuẩn bị.
-- Trang nhiều lời thoại sử dụng vùng thoại riêng để hạn chế đè lên nhân vật.
-- Trang sau dàn thoại tiếp tục được đưa qua Testing.
+- Mỗi trang có một đoạn kể hoàn chỉnh khoảng 60–110 từ, phù hợp độ tuổi.
+- Tranh nằm ở cột bên trái, đoạn kể nằm trong cột riêng bên phải.
+- Chữ không được vẽ hoặc chồng trực tiếp lên tranh nên không thể che nhân vật.
+- Lời nhân vật, nếu có, được lồng tự nhiên trong đoạn kể bằng dấu ngoặc kép.
+- Trang sau dàn tranh và chữ tiếp tục được đưa qua Testing.
 
 ## Quản lý agent
 
-Mỗi dự án có 6 agent lõi không thể xóa. Có thể thêm tối đa 10 agent chuyên gia để tư vấn theo một vai trò riêng.
+Mỗi dự án có hai nhóm agent:
+
+| Nhóm | Chức năng | Có thể xóa? |
+|---|---|---|
+| **6 agent lõi** | Trực tiếp tạo sản phẩm: PM, Biên kịch, Thiết kế nhân vật, Họa sĩ, Kiểm duyệt, Biên tập & dàn trang. | Không |
+| **Agent bổ sung** | Đóng vai chuyên gia tư vấn cho một dự án cụ thể trước khi sản xuất nội dung. | Có |
+
+Một dự án có thể có tối đa 10 agent bổ sung. Agent bổ sung **không thay thế agent lõi** và không trực tiếp viết lại kịch bản, tạo ảnh, duyệt sản phẩm hoặc xuất PDF.
+
+### Agent bổ sung làm gì?
+
+Khi tạo agent, người dùng xác định ba thông tin quan trọng:
+
+- **Tên:** tên hiển thị trong List, lịch và phần giao tiếp.
+- **Vai trò:** lĩnh vực mà agent chịu trách nhiệm tư vấn, ví dụ lịch sử Việt Nam, tâm lý trẻ em hoặc giáo dục khoa học.
+- **Hướng dẫn làm việc:** quy định cụ thể agent phải kiểm tra, điều cần khuyến nghị và điều phải tránh.
+
+Mỗi agent bổ sung đọc:
+
+- Yêu cầu ban đầu của người dùng.
+- Kế hoạch sản xuất do PM tạo.
+- Vai trò và hướng dẫn riêng đã được cấu hình.
+
+Sau đó agent trả về ba nhóm thông tin:
+
+```text
+Khuyến nghị có thể thực hiện
+Rủi ro cần tránh
+Ghi chú bàn giao cho các agent lõi
+```
+
+Kết quả tư vấn được lưu vào trạng thái dự án và được đưa vào ngữ cảnh làm việc của **Biên kịch**, **Thiết kế nhân vật** và **Họa sĩ**. Các agent lõi vẫn chịu trách nhiệm cuối cùng đối với sản phẩm của mình.
+
+### Agent bổ sung hoạt động ở thời điểm nào?
+
+```text
+PM lập kế hoạch
+      │
+      ▼
+Các agent bổ sung lần lượt tư vấn
+      │
+      ▼
+Biên kịch → Thiết kế nhân vật → Họa sĩ → Kiểm duyệt → Dàn trang
+```
+
+- Các agent bổ sung chạy sau PM và trước Biên kịch.
+- Nếu có nhiều agent bổ sung, hệ thống gọi lần lượt từng agent và thu thập tất cả kết quả.
+- Task tư vấn xuất hiện trong List và lịch; kịch bản phụ thuộc vào việc hoàn tất các task tư vấn này.
+- Nếu một agent bổ sung gặp lỗi model, hệ thống ghi lại lỗi, bỏ qua tư vấn đó và tiếp tục workflow lõi. Agent tùy chọn không làm hỏng toàn bộ dự án.
+- Agent được thêm hoặc bật lại chỉ tham gia khi workflow **đi qua giai đoạn tư vấn lần tiếp theo**. Nó không tự sửa những sản phẩm đã hoàn thành trước đó.
+
+### Ví dụ agent bổ sung
+
+| Vai trò | Nhiệm vụ nên giao |
+|---|---|
+| **Cố vấn lịch sử Việt Nam** | Kiểm tra niên đại, trang phục, kiến trúc, cách xưng hô và chi tiết văn hóa. |
+| **Chuyên gia tâm lý trẻ em** | Kiểm tra thông điệp, mức độ đáng sợ, cách giải quyết xung đột theo độ tuổi. |
+| **Cố vấn giáo dục khoa học** | Kiểm tra kiến thức khoa học và đề xuất cách giải thích dễ hiểu. |
+| **Cố vấn văn hóa địa phương** | Kiểm tra phong tục, địa danh, biểu tượng và tránh mô tả sai lệch. |
+| **Chuyên gia hài hước** | Đề xuất tình huống vui phù hợp độ tuổi nhưng không thay đổi cốt truyện trực tiếp. |
+
+Ví dụ cấu hình:
+
+```text
+Tên: An
+Vai trò: Cố vấn lịch sử Việt Nam
+Hướng dẫn: Kiểm tra trang phục, kiến trúc, cách xưng hô và các chi tiết lịch sử.
+Chỉ nêu lỗi có bằng chứng; ưu tiên đề xuất ngắn để Biên kịch và Họa sĩ áp dụng.
+```
+
+### Các thao tác trong tab Agent
 
 Trong tab **Agent**, có thể:
 
-- Thêm, bật, tắt hoặc xóa agent bổ sung.
+- Thêm agent bổ sung với tên, vai trò, hướng dẫn và màu nhận diện.
+- Tạm ngưng agent để agent không tham gia lần tư vấn tiếp theo.
+- Kích hoạt lại agent đã tạm ngưng.
+- Xóa agent bổ sung khỏi dự án. Việc xóa không xóa ngược những tư vấn đã được dùng trong sản phẩm cũ.
 - Chọn model chính từ danh sách 9Router.
 - Chọn nhiều model fallback.
-- Chọn model ảnh cho Thiết kế nhân vật hoặc Họa sĩ.
+- Chọn model ảnh cho hai agent lõi Thiết kế nhân vật hoặc Họa sĩ.
 - Điều chỉnh temperature.
+
+Agent lõi chỉ cho phép thay đổi cấu hình model; không thể đổi vai trò, tắt hoặc xóa. Agent bổ sung có thể quản lý đầy đủ.
+
+### Cách agent sử dụng model
 
 Thứ tự gọi model của một agent:
 
 ```text
 Model riêng của agent → fallback riêng → fallback toàn hệ thống
 ```
+
+- **Model chính:** model được gọi đầu tiên cho agent đó.
+- **Fallback riêng:** chỉ được gọi khi model chính hết quota, token hoặc gặp lỗi định tuyến phù hợp.
+- **Fallback toàn hệ thống:** lớp dự phòng cuối từ trang quản lý model 9Router.
+- **Temperature thấp:** kết quả ổn định, phù hợp kiểm tra dữ kiện.
+- **Temperature cao:** nhiều ý tưởng hơn, phù hợp tư vấn sáng tạo.
 
 ## Quản lý model 9Router toàn hệ thống
 

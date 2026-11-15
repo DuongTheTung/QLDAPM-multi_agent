@@ -26,8 +26,9 @@ nghiêm trọng hoặc file hỏng/thiếu; lỗi nhỏ ghi vào notes và vẫn
       "serious_issues": ["..."], "notes": ["..."]
     }"""
 
-    SYSTEM = """Bạn là trưởng kiểm duyệt truyện tranh. Duyệt mạch truyện, an toàn theo tuổi,
-độ nhất quán nhân vật/bối cảnh và mức trung thành với kịch bản. Chỉ REVISE khi có lỗi nghiêm trọng.
+    SYSTEM = """Bạn là trưởng kiểm duyệt truyện tranh. Duyệt mạch truyện, các đoạn kể theo trang,
+an toàn theo tuổi, độ nhất quán nhân vật/bối cảnh và mức trung thành với kịch bản. Đoạn kể phải đủ ý,
+nối mạch và đọc độc lập bên cạnh tranh; không yêu cầu bóng thoại. Chỉ REVISE khi có lỗi nghiêm trọng.
 Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc artist. Không tự sửa hay vẽ lại sản phẩm."""
     SCHEMA = """{
       "verdict": "PASS|REVISE", "summary": "kết luận ngắn",
@@ -230,6 +231,12 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         if len(script_pages) != expected:
             target = "writer"
             issues.append({"category": "page_count", "reason": "Kịch bản thiếu trang", "evidence": f"{len(script_pages)}/{expected}"})
+        elif any(len(LayoutService._story_text(page).split()) < 35 for page in script_pages):
+            target = "writer"
+            issues.append({
+                "category": "story_text", "reason": "Đoạn kể của một hoặc nhiều trang quá ngắn",
+                "evidence": "Mỗi trang cần đoạn kể đủ ý để đọc cạnh tranh minh họa.",
+            })
         elif len(prompts) != expected or len(images) != expected or any(not Path(path).is_file() for path in images):
             target = "artist"
             issues.append({"category": "artwork", "reason": "Thiếu prompt hoặc ảnh", "evidence": f"prompts={len(prompts)}, images={len(images)}"})
