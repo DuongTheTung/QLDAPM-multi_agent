@@ -18,17 +18,19 @@ class ReviewerAgent(BaseAgent):
     agent_id = "reviewer"
     display_name = "Kiểm duyệt"
 
-    UNIT_SYSTEM = """Bạn là agent kiểm duyệt độc lập của xưởng truyện tranh. Kiểm tra đúng đầu ra
-được giao, độ an toàn theo tuổi, sự đầy đủ và tính nhất quán với ngữ cảnh. Chỉ REVISE khi có lỗi
-nghiêm trọng hoặc file hỏng/thiếu; lỗi nhỏ ghi vào notes và vẫn PASS. Không tự sửa nội dung hay ảnh."""
+    UNIT_SYSTEM = """Bạn là agent kiểm duyệt độc lập của xưởng truyện tranh. Chính sách mặc định
+là PASS. Chỉ REVISE khi có bằng chứng rõ về file hỏng/thiếu, nội dung không an toàn theo tuổi, sai
+nghiêm trọng kịch bản đã khóa hoặc đổi ngoại hình nhân vật. Không REVISE vì sở thích thẩm mỹ, cách
+diễn đạt chưa hoàn hảo hay lỗi nhỏ; các lỗi đó ghi vào notes và vẫn PASS. Không tự sửa sản phẩm."""
     UNIT_SCHEMA = """{
       "verdict": "PASS|REVISE", "summary": "kết luận cụ thể",
       "serious_issues": ["..."], "notes": ["..."]
     }"""
 
-    SYSTEM = """Bạn là trưởng kiểm duyệt truyện tranh. Duyệt mạch truyện, các đoạn kể theo trang,
-an toàn theo tuổi, độ nhất quán nhân vật/bối cảnh và mức trung thành với kịch bản. Đoạn kể phải đủ ý,
-nối mạch và đọc độc lập bên cạnh tranh; không yêu cầu bóng thoại. Chỉ REVISE khi có lỗi nghiêm trọng.
+    SYSTEM = """Bạn là trưởng kiểm duyệt truyện tranh. Chính sách mặc định là PASS. Duyệt mạch
+truyện, các đoạn kể theo trang, an toàn theo tuổi, độ nhất quán nhân vật/bối cảnh và mức trung thành
+với kịch bản. Đoạn kể cần đủ ý và nối mạch; không yêu cầu bóng thoại. Chỉ REVISE khi có bằng chứng
+rõ về lỗi nghiêm trọng. Lỗi nhỏ hoặc lựa chọn thẩm mỹ chỉ ghi vào minor_notes và vẫn PASS.
 Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc artist. Không tự sửa hay vẽ lại sản phẩm."""
     SCHEMA = """{
       "verdict": "PASS|REVISE", "summary": "kết luận ngắn",
@@ -55,15 +57,23 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         artifact_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         artifact_ids = artifact_ids or []
+        reviewers = self.role_workers(state)
+        reviewer = reviewers[sum(unit_key.encode("utf-8")) % len(reviewers)]
+        reviewer_id = str(reviewer["runtime_id"])
+        if not reviewer.get("is_core"):
+            self.db.set_task_status(state["project_id"], reviewer_id, "in_progress")
         self.db.begin_task_testing(state["project_id"], owner, unit_key)
         test_id = self.db.create_quality_test(
-            state["project_id"], owner, unit_key, title, artifact_ids,
+            state["project_id"], owner, unit_key, title, artifact_ids, reviewer_id,
         )
         payload = {
             "test_id": test_id, "owner": owner, "unit_key": unit_key,
             "title": title, "artifact_ids": artifact_ids, "content": content,
         }
-        self.event(state, "testing_started", f"Đang kiểm tra: {title}", payload)
+        self.worker_event(
+            state, reviewer, "testing_started",
+            f"{reviewer['name']} đang kiểm tra: {title}", payload,
+        )
         technical_issue = self._technical_issue(image_path)
         if technical_issue:
             result: dict[str, Any] = {
@@ -75,14 +85,14 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
                 f"Agent thực hiện: {owner}\nĐầu ra: {title}\n"
                 f"Ngữ cảnh kiểm tra:\n{json.dumps(content, ensure_ascii=False, default=str)[:14000]}"
             )
-            models, temperature, _ = self.model_config(state, 0.05)
+            models, temperature, _ = self.worker_model_config(state, reviewer, 0.05)
             try:
                 result, _ = await self.router.chat_json(
                     system=self.UNIT_SYSTEM,
                     prompt=prompt,
                     schema_hint=self.UNIT_SCHEMA,
                     temperature=temperature,
-                    on_attempt=self.model_attempt(state),
+                    on_attempt=self.worker_attempt(state, reviewer),
                     image_paths=[image_path] if image_path else None,
                     timeout_seconds=60,
                     models=models,
@@ -105,8 +115,8 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
                 state["project_id"], owner, f"Testing trả lại: {title}",
                 feedback or "Sửa lỗi nghiêm trọng được Kiểm duyệt phát hiện.", 40 + test_id,
             )
-        self.event(
-            state,
+        self.worker_event(
+            state, reviewer,
             "testing_passed" if passed else "testing_failed",
             f"{title}: {'ĐẠT' if passed else 'CHƯA ĐẠT — trả lại ' + owner}",
             {**payload, "result": result, "assigned_to": None if passed else owner},
@@ -170,10 +180,13 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         )
         if verdict == "REVISE":
             self.step(state, "reviewer_final", "Kiểm duyệt kết luận và giao lại agent xử lý")
-            return self._revision(state, review, usage, [artifact_id, review_id])
+            result = self._revision(state, review, usage, [artifact_id, review_id])
+            self._complete_helpers(state)
+            return result
         self.step(state, "reviewer_final", "Kiểm duyệt kết luận sản phẩm đạt yêu cầu")
         self.db.update_project(state["project_id"], stage="layout", progress=90)
         self.completed(state, "Kiểm duyệt tổng thể kết luận ĐẠT")
+        self._complete_helpers(state)
         self.event(
             state, "review_passed", "Sản phẩm đạt kiểm duyệt; chuyển Biên tập dàn trang",
             {"artifact_ids": [artifact_id, review_id], "result": review, "to": "editor"},
@@ -182,6 +195,14 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             **state, "review": review, "stage": "layout",
             "model_usage": [*state.get("model_usage", []), usage],
         }
+
+    def _complete_helpers(self, state: ComicState) -> None:
+        for worker in self.role_workers(state)[1:]:
+            self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
+            self.worker_event(
+                state, worker, "agent_completed",
+                f"{worker['name']} đã hoàn thành phần Testing được PM phân công",
+            )
 
     def save_json_file(self, state: ComicState, review: dict[str, Any]) -> Path:
         path = self.project_dir(state) / f"05-review-{state.get('revision_count', 0) + 1}.json"
@@ -198,12 +219,23 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             target = "artist"
         instructions = str(review.get("revision_instructions") or review.get("summary") or "Sửa lỗi nghiêm trọng")
         if count > self.settings.max_revisions:
-            error = f"Đã chạm giới hạn {self.settings.max_revisions} vòng sửa. Lỗi cuối: {instructions}"
             self.db.update_project(
-                state["project_id"], status="needs_attention", stage="needs_attention",
-                error=error, progress=96,
+                state["project_id"], status="running", stage="layout",
+                error=None, progress=90,
             )
-            return {**state, "review": review, "stage": "needs_attention", "completed": True, "error": error}
+            self.event(
+                state, "quality_override",
+                f"Đã đủ {self.settings.max_revisions} vòng sửa; ghi chú lỗi nhỏ và tiếp tục dàn trang.",
+                {"review": review, "last_instructions": instructions},
+            )
+            review["verdict"] = "PASS"
+            review.setdefault("minor_notes", []).append(
+                "Đã đạt giới hạn vòng sửa tự động; tiếp tục để không làm dừng dự án."
+            )
+            return {
+                **state, "review": review, "stage": "layout", "revision_count": count,
+                "feedback": "", "model_usage": [*state.get("model_usage", []), usage],
+            }
         progress = {"writer": 18, "designer": 36, "artist": 52}[target]
         stage = {"writer": "script", "designer": "character_design", "artist": "illustration"}[target]
         self.db.update_project(state["project_id"], stage=stage, progress=progress)

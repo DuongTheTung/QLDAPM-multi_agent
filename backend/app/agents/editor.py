@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from ..config import Settings
@@ -141,31 +142,58 @@ coi là lỗi nghiêm trọng của writer."""
             state, "editor_layout", "Bìa đã dàn trang", image_path=final_cover,
             artifact_ids=[cover_id],
         )
-        if cover_test.get("verdict") == "REVISE":
-            raise ValueError(f"Bìa hoàn thiện chưa đạt: {cover_test.get('summary', '')}")
-        final_pages: list[Path] = []
+        self.revise_if_needed(state, cover_test, "editor_layout")
         script_pages = state["script"].get("pages", [])
-        self.step(state, "editor_pages", "Biên tập đang kiểm tra từng trang tranh và đoạn kể")
-        for index, (raw, page) in enumerate(zip(state["page_images"], script_pages), start=1):
+        workers = self.role_workers(state)
+        self.step(
+            state, "editor_pages",
+            f"Đang chia dàn trang cho {len(workers)} agent Biên tập",
+        )
+        worker_locks = {
+            str(worker["runtime_id"]): asyncio.Semaphore(1) for worker in workers
+        }
+
+        async def layout_page_job(
+            index: int, raw: str, page: dict, worker: dict,
+        ) -> tuple[int, Path]:
+            worker_id = str(worker["runtime_id"])
+            step_key = self.worker_step_key(worker, "editor_pages")
+            self.db.set_task_status(state["project_id"], worker_id, "in_progress")
             output = final_dir / f"page-{index:02d}.png"
             layout_page = {**page}
-            self.layout.compose_story_page(Path(raw), layout_page, output)
-            final_pages.append(output)
+            async with worker_locks[worker_id]:
+                await asyncio.to_thread(
+                    self.layout.compose_story_page, Path(raw), layout_page, output,
+                )
             artifact_id = self.db.add_artifact(
-                state["project_id"], self.agent_id, "page_final",
+                state["project_id"], worker_id, "page_final",
                 f"Trang {index} — hoàn thiện", str(output),
             )
-            self.event(
-                state, "unit_completed",
-                f"Biên tập hoàn thành trang {index}; chuyển ngay sang Testing",
-                {"artifact_ids": [artifact_id], "page": index, "unit_key": f"editor_page_{index}"},
+            self.worker_event(
+                state, worker, "unit_completed",
+                f"{worker['name']} hoàn thành dàn trang {index}; chuyển ngay sang Testing",
+                {"artifact_ids": [artifact_id], "page": index, "unit_key": step_key},
             )
             result = await self.quality_gate(
-                state, "editor_pages", f"Trang {index} sau dàn tranh và chữ",
-                content=layout_page, image_path=output, artifact_ids=[artifact_id],
+                state, step_key, f"Trang {index} sau dàn tranh và chữ",
+                content=layout_page, image_path=output, artifact_ids=[artifact_id], owner=worker_id,
             )
-            if result.get("verdict") == "REVISE":
-                raise ValueError(f"Trang {index} sau dàn chưa đạt: {result.get('summary', '')}")
+            self.revise_if_needed(state, result, step_key)
+            return index, output
+
+        results = await asyncio.gather(*(
+            layout_page_job(index, raw, page, workers[(index - 1) % len(workers)])
+            for index, (raw, page) in enumerate(
+                zip(state["page_images"], script_pages), start=1,
+            )
+        ))
+        final_pages = [path for _, path in sorted(results)]
+        for worker in workers[1:]:
+            self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
+            self.worker_event(
+                state, worker, "agent_completed",
+                f"{worker['name']} đã hoàn thành phần dàn trang được PM phân công",
+            )
         destination = final_dir / "comic.pdf"
         self.step(state, "editor_pdf", "Biên tập đang hoàn thiện bìa và xuất PDF")
         metadata = {
@@ -187,8 +215,7 @@ coi là lỗi nghiêm trọng của writer."""
             state, "editor_pdf", "PDF truyện tranh cuối", content=metadata,
             artifact_ids=[pdf_id],
         )
-        if pdf_test.get("verdict") == "REVISE":
-            raise ValueError(f"PDF chưa đạt kiểm duyệt: {pdf_test.get('summary', '')}")
+        self.revise_if_needed(state, pdf_test, "editor_pdf")
         self.db.set_task_status(state["project_id"], self.agent_id, "done")
         self.db.update_project(state["project_id"], stage="finalized", progress=98, final_pdf=str(destination))
         self.event(

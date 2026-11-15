@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from ..schemas import ComicState
 from ..services.images import ImageService
 from .base import BaseAgent
@@ -39,7 +41,7 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
         prompt += self.expert_context(state)
         if feedback:
             prompt += f"\n\nYêu cầu sửa của biên tập:\n{feedback}"
-        models, temperature, image_model = self.model_config(state, 0.45)
+        models, temperature, _ = self.model_config(state, 0.45)
         bible, usage = await self.router.chat_json(
             system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
             temperature=temperature, on_attempt=self.model_attempt(state), models=models,
@@ -49,46 +51,67 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
         bible_test = await self.quality_gate(
             state, "designer_bible", "Hồ sơ nhân vật và khóa phong cách", content=bible,
         )
-        if bible_test.get("verdict") == "REVISE":
-            raise ValueError(f"Character bible chưa đạt kiểm duyệt: {bible_test.get('summary', '')}")
+        self.revise_if_needed(state, bible_test, "designer_bible")
         anchor_test = await self.quality_gate(
             state, "designer_anchors", "Anchor nhân vật và bối cảnh", content=bible,
         )
-        if anchor_test.get("verdict") == "REVISE":
-            raise ValueError(f"Anchor chưa đạt kiểm duyệt: {anchor_test.get('summary', '')}")
+        self.revise_if_needed(state, anchor_test, "designer_anchors")
         refs_dir = self.project_dir(state) / "references"
+        workers = self.role_workers(state)
+        self.step(
+            state, "designer_references",
+            f"Đang chia ảnh tham chiếu cho {len(workers)} agent Thiết kế",
+        )
+        semaphore = asyncio.Semaphore(min(4, len(workers)))
+        worker_locks = {
+            str(worker["runtime_id"]): asyncio.Semaphore(1) for worker in workers
+        }
 
-        def warning(message: str) -> None:
-            self.event(state, "warning", message)
-
-        self.step(state, "designer_references", "Thiết kế đang tạo bộ ảnh tham chiếu")
-        for index, character in enumerate(bible.get("characters", []), start=1):
+        async def render_reference(index: int, character: dict, worker: dict) -> None:
+            worker_id = str(worker["runtime_id"])
+            step_key = self.worker_step_key(worker, "designer_references")
+            self.db.set_task_status(state["project_id"], worker_id, "in_progress")
             safe_name = f"character-{index:02d}.png"
             image_prompt = (
                 f"{bible.get('style_lock', '')}\n{character.get('fixed_anchor', '')}\n"
                 f"{character.get('reference_prompt', '')}\n"
                 "Professional character model sheet, front view, side view, five facial expressions, white background."
             )
-            path = await self.images.generate(
-                image_prompt, refs_dir / safe_name, landscape=True,
-                on_warning=warning, model=image_model,
-            )
+            _, _, image_model = self.worker_model_config(state, worker, 0.45)
+            async with semaphore, worker_locks[worker_id]:
+                path = await self.images.generate(
+                    image_prompt, refs_dir / safe_name, landscape=True,
+                    on_warning=lambda message: self.worker_event(
+                        state, worker, "warning", message,
+                    ),
+                    model=image_model,
+                )
             artifact_id = self.db.add_artifact(
-                state["project_id"], self.agent_id, "reference_image",
+                state["project_id"], worker_id, "reference_image",
                 character.get("name", safe_name), str(path),
             )
-            self.event(
-                state, "unit_completed",
-                f"Thiết kế hoàn thành ảnh tham chiếu {character.get('name', index)}; chuyển sang Testing",
-                {"artifact_ids": [artifact_id], "content": character, "unit_key": f"reference_{index}"},
+            self.worker_event(
+                state, worker, "unit_completed",
+                f"{worker['name']} hoàn thành ảnh tham chiếu {character.get('name', index)}; chuyển sang Testing",
+                {"artifact_ids": [artifact_id], "content": character, "unit_key": step_key},
             )
             result = await self.quality_gate(
-                state, "designer_references",
+                state, step_key,
                 f"Ảnh tham chiếu {character.get('name', index)}", content=character,
-                image_path=path, artifact_ids=[artifact_id],
+                image_path=path, artifact_ids=[artifact_id], owner=worker_id,
             )
-            if result.get("verdict") == "REVISE":
-                raise ValueError(f"Ảnh tham chiếu chưa đạt kiểm duyệt: {result.get('summary', '')}")
+            self.revise_if_needed(state, result, step_key)
+        characters = bible.get("characters", [])
+        await asyncio.gather(*(
+            render_reference(index, character, workers[(index - 1) % len(workers)])
+            for index, character in enumerate(characters, start=1)
+        ))
+        for worker in workers[1:]:
+            self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
+            self.worker_event(
+                state, worker, "agent_completed",
+                f"{worker['name']} đã hoàn thành phần thiết kế được PM phân công",
+            )
         self.db.update_project(state["project_id"], stage="illustration", progress=48)
         self.completed(state, f"Đã khóa style và {len(bible.get('characters', []))} character anchor")
         self.event(state, "handoff", "Thiết kế đã qua Testing; bàn giao bible và ảnh tham chiếu cho Họa sĩ", {"to": "artist"})

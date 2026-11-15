@@ -27,6 +27,21 @@ def test_pm_builds_specific_task_and_subtask_hierarchy():
     assert any("8" in item["title"] for item in children if item["agent"] == "artist")
 
 
+def test_pm_keeps_six_workflow_lanes_and_assigns_named_role_workers():
+    helper = {
+        "id": "custom-artist-1", "name": "An", "role": "Họa sĩ",
+        "role_key": "artist",
+    }
+    tasks = PMAgent._schedule("project-123", 8, [helper])
+    parents = [item for item in tasks if item["item_type"] == "task"]
+    helper_tasks = [item for item in tasks if item["agent"] == helper["id"]]
+
+    assert len(parents) == 6
+    assert len(helper_tasks) == 1
+    assert helper_tasks[0]["parent_id"].endswith("-ART")
+    assert "An" in helper_tasks[0]["title"]
+
+
 def test_editor_routes_revision_to_owner():
     assert ComicWorkflow._after_editor({"stage": "script"}) == "writer"
     assert ComicWorkflow._after_editor({"stage": "character_design"}) == "designer"

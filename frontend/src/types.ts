@@ -1,4 +1,5 @@
 export type AgentId = 'pm' | 'writer' | 'designer' | 'artist' | 'reviewer' | 'editor'
+export type WorkerRole = Exclude<AgentId, 'pm'>
 
 export interface Project {
   id: string; title: string; prompt: string; status: string; stage: string; progress: number
@@ -23,6 +24,7 @@ export interface Artifact {
 export interface ProjectAgent {
   id: string; key: string; project_id: string; name: string; role: string; instructions: string
   color: string; is_core: boolean; enabled: boolean; created_at: string
+  role_key: AgentId
   model?: string; fallback_models: string[]; image_model?: string; temperature?: number
 }
 

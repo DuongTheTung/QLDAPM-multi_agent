@@ -27,12 +27,16 @@ def test_project_agents_include_six_core_and_manage_custom_agent(tmp_path: Path)
     assert all(agent["is_core"] for agent in agents)
 
     custom = database.create_project_agent(
-        "project-1", "An Toàn", "Cố vấn an toàn", "Kiểm tra nội dung phù hợp trẻ em.",
+        "project-1", "An Toàn", "reviewer", "Kiểm tra nội dung phù hợp trẻ em.",
         "#557a68", "cx/gpt-5.6-sol", ["ag/gemini-3.8-flash-medium"], 0.3,
     )
     assert custom["model"] == "cx/gpt-5.6-sol"
     assert custom["fallback_models"] == ["ag/gemini-3.8-flash-medium"]
     assert custom["temperature"] == 0.3
+    assert custom["role_key"] == "reviewer"
+    assert custom["role"] == "Kiểm duyệt"
+    workers = database.role_workers("project-1", "reviewer")
+    assert [worker["runtime_id"] for worker in workers] == ["reviewer", custom["id"]]
     assert len(database.list_project_agents("project-1")) == 7
     assert database.update_project_agent("project-1", custom["id"], enabled=False)
     assert database.get_project_agent("project-1", custom["id"])["enabled"] is False

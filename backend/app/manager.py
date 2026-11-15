@@ -6,6 +6,7 @@ import traceback
 from typing import Any
 
 from .db import Database
+from .exceptions import AutomaticRevision
 from .schemas import ComicState
 from .workflow import ComicWorkflow
 
@@ -66,7 +67,52 @@ class WorkflowManager:
             self.db.update_project(
                 project_id, status="running", pause_requested=False, error=None,
             )
-            await self.workflow.run(state)
+            while True:
+                try:
+                    await self.workflow.run(state)
+                    break
+                except AutomaticRevision as revision:
+                    project = self.db.get_project(project_id)
+                    persisted: ComicState = json.loads(
+                        (project or {}).get("state_json") or "{}"
+                    )
+                    next_state: ComicState = {**state, **persisted}
+                    counts = dict(next_state.get("automatic_revision_counts", {}))
+                    count = int(counts.get(revision.unit_key, 0)) + 1
+                    counts[revision.unit_key] = count
+                    next_state["automatic_revision_counts"] = counts
+                    next_state["stage"] = {
+                        "writer": "script", "designer": "character_design",
+                        "artist": "illustration", "reviewer": "testing", "editor": "layout",
+                    }.get(revision.target, next_state.get("stage", "script"))
+                    next_state["feedback"] = revision.feedback
+                    if count > self.workflow.settings.max_revisions:
+                        bypass = list(next_state.get("review_bypass", []))
+                        if revision.unit_key not in bypass:
+                            bypass.append(revision.unit_key)
+                        next_state["review_bypass"] = bypass
+                        event_type = "quality_override"
+                        message = (
+                            f"Đã sửa {count - 1} lần; ghi chú lỗi và tiếp tục thay vì dừng dự án: "
+                            f"{revision.feedback}"
+                        )
+                    else:
+                        event_type = "revision_assigned"
+                        message = (
+                            f"Tự giao lại {revision.target} vòng {count}: {revision.feedback}"
+                        )
+                    self.db.update_project(
+                        project_id, status="running", stage=next_state["stage"], error=None,
+                        state_json=json.dumps(next_state, ensure_ascii=False),
+                    )
+                    self.db.add_event(
+                        project_id, "pm", event_type, message,
+                        {
+                            "to": revision.target, "unit_key": revision.unit_key,
+                            "revision": count,
+                        },
+                    )
+                    state = next_state
         except Exception as error:  # noqa: BLE001 - workflow boundary must persist every provider failure
             trace = traceback.format_exc(limit=8)
             self.db.update_project(project_id, status="failed", error=str(error))

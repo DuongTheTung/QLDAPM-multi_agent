@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..db import Database
+from ..exceptions import AutomaticRevision
 from ..schemas import ComicState
 from ..services.router import NineRouterClient
 
@@ -53,13 +54,41 @@ class BaseAgent:
         content: Any = None,
         image_path: Path | None = None,
         artifact_ids: list[int] | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
+        if step_key in state.get("review_bypass", []):
+            bypass_owner = owner or self.agent_id
+            self.db.finish_task_testing(
+                state["project_id"], bypass_owner, step_key, True,
+            )
+            self.event(
+                state, "quality_override",
+                f"Cho phép tiếp tục {title} sau các vòng giao sửa tự động.",
+                {"unit_key": step_key, "owner": bypass_owner},
+            )
+            return {
+                "verdict": "PASS", "summary": "Đã ghi chú để tiếp tục sau giới hạn vòng sửa.",
+                "serious_issues": [], "notes": ["Quality gate được nới sau nhiều vòng sửa."],
+            }
         if self.reviewer is None:
             return {"verdict": "PASS", "summary": "Reviewer chưa được gắn."}
         return await self.reviewer.inspect_unit(
-            state, owner=self.agent_id, unit_key=step_key, title=title,
+            state, owner=owner or self.agent_id, unit_key=step_key, title=title,
             content=content, image_path=image_path, artifact_ids=artifact_ids,
         )
+
+    def revise_if_needed(
+        self, state: ComicState, result: dict[str, Any], unit_key: str,
+    ) -> None:
+        if str(result.get("verdict", "PASS")).upper() != "REVISE":
+            return
+        feedback = str(result.get("summary") or "Sửa lỗi nghiêm trọng được Kiểm duyệt phát hiện.")
+        self.event(
+            state, "automatic_revision_requested",
+            f"Kiểm duyệt tự giao lại {self.display_name}: {feedback}",
+            {"to": self.agent_id, "unit_key": unit_key, "result": result},
+        )
+        raise AutomaticRevision(self.agent_id, unit_key, feedback)
 
     def model_attempt(self, state: ComicState):
         def callback(model: str, attempt: int, fallback: bool) -> None:
@@ -91,6 +120,46 @@ class BaseAgent:
         return models, float(temperature) if temperature is not None else default_temperature, (
             str(agent.get("image_model") or "").strip() or None
         )
+
+    def role_workers(self, state: ComicState) -> list[dict[str, Any]]:
+        return self.db.role_workers(state["project_id"], self.agent_id)
+
+    def worker_model_config(
+        self, state: ComicState, worker: dict[str, Any], default_temperature: float,
+    ) -> tuple[list[str] | None, float, str | None]:
+        primary = str(worker.get("model") or "").strip()
+        fallbacks = [
+            str(model).strip() for model in worker.get("fallback_models", [])
+            if str(model).strip()
+        ]
+        configured = [primary, *fallbacks] if primary or fallbacks else []
+        models = list(dict.fromkeys([*configured, *self.router.settings.models])) if configured else None
+        temperature = worker.get("temperature")
+        return models, float(temperature) if temperature is not None else default_temperature, (
+            str(worker.get("image_model") or "").strip() or None
+        )
+
+    def worker_event(
+        self, state: ComicState, worker: dict[str, Any], event_type: str,
+        message: str, payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.db.add_event(
+            state["project_id"], str(worker["runtime_id"]), event_type, message, payload,
+        )
+
+    def worker_step_key(self, worker: dict[str, Any], default: str) -> str:
+        if worker.get("is_core"):
+            return default
+        return f"{self.agent_id}_support_{str(worker['id'])[-6:]}"
+
+    def worker_attempt(self, state: ComicState, worker: dict[str, Any]):
+        def callback(model: str, attempt: int, fallback: bool) -> None:
+            self.worker_event(
+                state, worker, "model_fallback" if fallback else "model_call",
+                f"{'Chuyển sang' if fallback else 'Đang gọi'} {model}",
+                {"model": model, "attempt": attempt, "fallback": fallback},
+            )
+        return callback
 
     def expert_context(self, state: ComicState) -> str:
         outputs = state.get("custom_agent_outputs", [])

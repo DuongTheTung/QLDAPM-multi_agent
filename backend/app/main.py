@@ -18,6 +18,7 @@ from .config import get_settings
 from .manager import WorkflowManager
 from .runtime import db
 from .schemas import (
+    WORKER_ROLE_LABELS,
     ApprovalDecisionRequest,
     CreateAgentRequest,
     CreateProjectRequest,
@@ -241,9 +242,32 @@ async def update_router_models(request: RouterSettingsRequest):
 
 @app.post("/api/projects", status_code=202)
 async def create_project(request: CreateProjectRequest):
+    for core_config in request.core_agent_models:
+        validate_model_choices({"model": core_config.model})
+    for agent in request.agents:
+        validate_model_choices({
+            "model": agent.model, "fallback_models": agent.fallback_models,
+            "image_model": agent.image_model, "temperature": agent.temperature,
+        })
     project_id = uuid.uuid4().hex
     title = request.title or "Đang phân tích brief…"
     project = db.create_project(project_id, title, request.prompt.strip())
+    for core_config in request.core_agent_models:
+        db.update_project_agent(
+            project_id, f"{project_id}:{core_config.agent_id}", model=core_config.model,
+        )
+    for agent_request in request.agents:
+        agent = db.create_project_agent(
+            project_id, agent_request.name.strip(), agent_request.role_key,
+            agent_request.instructions.strip(), agent_request.color,
+            agent_request.model, list(dict.fromkeys(agent_request.fallback_models)),
+            agent_request.temperature, agent_request.image_model,
+        )
+        db.add_event(
+            project_id, "pm", "agent_added",
+            f"Đội hình ban đầu có {agent['name']} — {agent['role']}",
+            {"agent_id": agent["id"], "during_project_creation": True},
+        )
     initial_state = {
         "project_id": project_id, "user_prompt": request.prompt.strip(), "title": title,
         "stage": "brief", "revision_count": 0, "model_usage": [], "completed": False,
@@ -288,26 +312,31 @@ async def list_project_agents(project_id: str):
 
 @app.post("/api/projects/{project_id}/agents", status_code=201)
 async def create_project_agent(project_id: str, request: CreateAgentRequest):
-    if not db.get_project(project_id):
+    project = db.get_project(project_id)
+    if not project:
         raise HTTPException(404, "Không tìm thấy dự án")
+    if project["status"] != "paused":
+        raise HTTPException(409, "Chỉ có thể thêm agent khi dự án đang tạm dừng")
     custom_agents = db.list_project_agents(project_id, custom_only=True)
     if len(custom_agents) >= 10:
         raise HTTPException(409, "Mỗi dự án được thêm tối đa 10 agent")
     model_config = {
         "model": request.model, "fallback_models": request.fallback_models,
-        "temperature": request.temperature,
+        "image_model": request.image_model, "temperature": request.temperature,
     }
     validate_model_choices(model_config)
     agent = db.create_project_agent(
         project_id,
         request.name.strip(),
-        request.role.strip(),
+        request.role_key,
         request.instructions.strip(),
         request.color,
         request.model,
         list(dict.fromkeys(request.fallback_models)),
         request.temperature,
+        request.image_model,
     )
+    db.add_helper_task(project_id, agent)
     db.add_event(
         project_id,
         "pm",
@@ -332,10 +361,15 @@ async def update_project_agent(project_id: str, agent_id: str, request: UpdateAg
         changes["fallback_models"] = list(dict.fromkeys(
             model.strip() for model in fallbacks if model.strip()
         ))
+    if changes.get("role_key"):
+        changes["role"] = WORKER_ROLE_LABELS[changes["role_key"]]
     validate_model_choices(changes)
     if not db.update_project_agent(project_id, agent_id, **changes):
         raise HTTPException(404, "Không tìm thấy agent")
     updated = db.get_project_agent(project_id, agent_id)
+    if changes.get("role_key") or ("name" in changes and not updated["is_core"]):
+        db.remove_agent_tasks(project_id, agent_id)
+        db.add_helper_task(project_id, updated)
     db.add_event(
         project_id,
         "pm",

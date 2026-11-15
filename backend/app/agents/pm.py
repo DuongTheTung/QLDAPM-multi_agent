@@ -49,25 +49,10 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         )
         tasks = self._schedule(state["project_id"], plan["page_count"], custom_agents)
         self.db.replace_tasks(state["project_id"], tasks)
-        scope_test = await self.quality_gate(
-            state, "pm_scope", "Phạm vi sản xuất", content=plan,
-        )
-        if scope_test.get("verdict") == "REVISE":
-            raise ValueError(f"Phạm vi chưa đạt kiểm duyệt: {scope_test.get('summary', '')}")
         self.step(state, "pm_schedule", "PM đang kiểm tra dependency và lịch sản xuất")
-        schedule_test = await self.quality_gate(
-            state, "pm_schedule", "Dependency và lịch sản xuất", content={"tasks": tasks},
-        )
-        if schedule_test.get("verdict") == "REVISE":
-            raise ValueError(f"Lịch sản xuất chưa đạt kiểm duyệt: {schedule_test.get('summary', '')}")
         self.step(state, "pm_handoff", "PM đã đồng bộ lịch, dependency và bàn giao task/subtask")
         self.db.update_project(state["project_id"], title=title, stage="script", progress=10)
         self.save_json(state, "01-production-plan.json", plan, "plan")
-        plan_test = await self.quality_gate(
-            state, "pm_handoff", "Kế hoạch sản xuất và tiêu chí nghiệm thu", content=plan,
-        )
-        if plan_test.get("verdict") == "REVISE":
-            raise ValueError(f"Kế hoạch chưa đạt kiểm duyệt: {plan_test.get('summary', '')}")
         self.completed(state, f"PM đã khóa brief “{title}” và lập {len(tasks)} work item")
         self.event(state, "handoff", "PM bàn giao production brief cho Biên kịch", {"to": "writer"})
         return {
@@ -100,7 +85,6 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
     ) -> list[dict[str, Any]]:
         now = datetime.now(UTC)
         custom_agents = custom_agents or []
-        consultation_minutes = len(custom_agents) * 8
         tasks: list[dict[str, Any]] = []
         prefix = project_id[:6]
 
@@ -148,20 +132,10 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
                 ("03", "Bàn giao danh sách việc cho từng agent", "pm_handoff"),
             ],
         )
-        consultation_ids: list[str] = []
-        for index, agent in enumerate(custom_agents):
-            code = f"CONSULT-{index + 1}"
-            consultation_ids.append(code)
-            add_group(
-                code, f"Tư vấn chuyên môn: {agent['role']}", agent["id"],
-                15 + index * 8, 23 + index * 8, ["PM"],
-                f"{agent['name']} kiểm tra brief theo chuyên môn {agent['role']}.",
-                [("01", "Phân tích rủi ro và bàn giao khuyến nghị", f"consult_{index + 1}")],
-            )
-        script_start = 15 + consultation_minutes
+        script_start = 15
         add_group(
             "SCRIPT", "Viết và khóa kịch bản phân trang", "writer",
-            script_start, script_start + 30, consultation_ids or ["PM"],
+            script_start, script_start + 30, ["PM"],
             "Kịch bản phải đủ mở–thắt–cao trào–kết–bài học và đúng số trang.",
             [
                 ("01", "Dựng cấu trúc câu chuyện và bài học", "writer_structure"),
@@ -210,5 +184,25 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
                 ("03", "Hoàn thiện bìa và xuất PDF", "editor_pdf"),
             ],
         )
+        role_parents = {
+            "writer": f"{prefix}-SCRIPT", "designer": f"{prefix}-DESIGN",
+            "artist": f"{prefix}-ART", "reviewer": f"{prefix}-REVIEW",
+            "editor": f"{prefix}-EDITOR",
+        }
+        for agent in custom_agents:
+            role_key = str(agent.get("role_key") or "")
+            parent_id = role_parents.get(role_key)
+            parent = next((item for item in tasks if item["id"] == parent_id), None)
+            if not parent:
+                continue
+            tasks.append({
+                "id": f"{parent_id}-HELP-{str(agent['id'])[-6:]}",
+                "title": f"{agent['name']} hỗ trợ {agent['role']}", "agent": agent["id"],
+                "status": "todo", "start_at": parent["start_at"], "due_at": parent["due_at"],
+                "depends_on": [],
+                "detail": f"PM chia phần việc trong lane {agent['role']} cho {agent['name']}.",
+                "order_index": len(tasks), "parent_id": parent_id, "item_type": "subtask",
+                "step_key": f"{role_key}_support_{str(agent['id'])[-6:]}",
+            })
         return tasks
 

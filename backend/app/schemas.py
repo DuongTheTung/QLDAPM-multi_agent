@@ -6,26 +6,44 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, Field
 
 AgentId = Literal["pm", "writer", "designer", "artist", "reviewer", "editor"]
+WorkerRole = Literal["writer", "designer", "artist", "reviewer", "editor"]
+
+WORKER_ROLE_LABELS: dict[str, str] = {
+    "writer": "Biên kịch",
+    "designer": "Thiết kế nhân vật",
+    "artist": "Họa sĩ",
+    "reviewer": "Kiểm duyệt",
+    "editor": "Biên tập & dàn trang",
+}
+
+
+class CreateAgentRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=60)
+    role_key: WorkerRole
+    instructions: str = Field(min_length=10, max_length=4000)
+    color: str = Field(default="#557a68", pattern=r"^#[0-9a-fA-F]{6}$")
+    model: str | None = Field(default=None, max_length=160)
+    fallback_models: list[str] = Field(default_factory=list, max_length=8)
+    image_model: str | None = Field(default=None, max_length=160)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class InitialCoreAgentModel(BaseModel):
+    agent_id: AgentId
+    model: str | None = Field(default=None, max_length=160)
 
 
 class CreateProjectRequest(BaseModel):
     prompt: str = Field(min_length=12, max_length=6000)
     title: str | None = Field(default=None, max_length=120)
-
-
-class CreateAgentRequest(BaseModel):
-    name: str = Field(min_length=2, max_length=60)
-    role: str = Field(min_length=2, max_length=100)
-    instructions: str = Field(min_length=10, max_length=4000)
-    color: str = Field(default="#557a68", pattern=r"^#[0-9a-fA-F]{6}$")
-    model: str | None = Field(default=None, max_length=160)
-    fallback_models: list[str] = Field(default_factory=list, max_length=8)
-    temperature: float | None = Field(default=None, ge=0, le=2)
+    agents: list[CreateAgentRequest] = Field(default_factory=list, max_length=10)
+    core_agent_models: list[InitialCoreAgentModel] = Field(default_factory=list, max_length=6)
 
 
 class UpdateAgentRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=60)
     role: str | None = Field(default=None, min_length=2, max_length=100)
+    role_key: WorkerRole | None = None
     instructions: str | None = Field(default=None, min_length=10, max_length=4000)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     enabled: bool | None = None
@@ -132,6 +150,8 @@ class ComicState(TypedDict, total=False):
     model_usage: list[dict[str, Any]]
     custom_agent_outputs: list[dict[str, Any]]
     approved_signatures: list[str]
+    automatic_revision_counts: dict[str, int]
+    review_bypass: list[str]
 
 
 def utcnow() -> str:

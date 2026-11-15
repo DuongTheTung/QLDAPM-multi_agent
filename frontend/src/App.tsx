@@ -2,23 +2,34 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight,
   Circle, Clock3, Download, FileImage, FileText, GalleryVerticalEnd, ListTodo,
-  LayoutDashboard, LockKeyhole, MessageSquareText, Pause, Play, Plus, Power, RefreshCw, Save,
+  LayoutDashboard, LockKeyhole, MessageSquareText, Pause, Pencil, Play, Plus, Power, RefreshCw, Save,
   Search, Settings2, ShieldCheck, Sparkles, Square, Trash2, UserPlus, UsersRound, X,
 } from 'lucide-react'
 import { api } from './api'
-import type { RouterCatalog } from './api'
-import type { AgentId, ApprovalStage, Artifact, EventContent, EventItem, Project, ProjectAgent, ProjectDetail, Task } from './types'
+import type { CreateAgentInput, RouterCatalog } from './api'
+import type { AgentId, ApprovalStage, Artifact, EventContent, EventItem, Project, ProjectAgent, ProjectDetail, QualityTest, Task, WorkerRole } from './types'
 
 const AGENTS: Record<string, { name: string; role: string; color: string; mark: string }> = {
-  pm: { name: 'Tùng', role: 'PM', color: '#263f35', mark: 'PM' },
-  writer: { name: 'Sơn', role: 'Biên kịch', color: '#dd5c3d', mark: 'BK' },
-  designer: { name: 'Hải', role: 'Thiết kế nhân vật', color: '#d99b2b', mark: 'TK' },
-  artist: { name: 'Sáng', role: 'Họa sĩ', color: '#426b91', mark: 'HS' },
-  reviewer: { name: 'Minh', role: 'Kiểm duyệt', color: '#3f8178', mark: 'KD' },
-  editor: { name: 'Trí', role: 'Biên tập & dàn trang', color: '#7d5c8d', mark: 'BT' },
+  pm: { name: 'PM', role: 'PM', color: '#263f35', mark: 'PM' },
+  writer: { name: 'Biên kịch', role: 'Biên kịch', color: '#dd5c3d', mark: 'BK' },
+  designer: { name: 'Thiết kế nhân vật', role: 'Thiết kế nhân vật', color: '#d99b2b', mark: 'TK' },
+  artist: { name: 'Họa sĩ', role: 'Họa sĩ', color: '#426b91', mark: 'HS' },
+  reviewer: { name: 'Kiểm duyệt', role: 'Kiểm duyệt', color: '#3f8178', mark: 'KD' },
+  editor: { name: 'Biên tập & dàn trang', role: 'Biên tập & dàn trang', color: '#7d5c8d', mark: 'BT' },
 }
 
 const DEFAULT_TEXT_MODELS = ['cx/gpt-5.6-sol', 'ag/gemini-3.8-flash-medium', 'gc/gemini-3-pro-preview']
+const WORKER_ROLES: { key: WorkerRole; label: string; help: string }[] = [
+  { key: 'writer', label: 'Biên kịch', help: 'Đề xuất cảnh và đoạn kể để Biên kịch chính tổng hợp.' },
+  { key: 'designer', label: 'Thiết kế nhân vật', help: 'Chia ảnh tham chiếu nhân vật và bối cảnh.' },
+  { key: 'artist', label: 'Họa sĩ', help: 'Nhận các trang riêng và tạo ảnh song parallel.' },
+  { key: 'reviewer', label: 'Kiểm duyệt', help: 'Chia các sản phẩm Testing để kiểm tra.' },
+  { key: 'editor', label: 'Biên tập & dàn trang', help: 'Chia các trang cần ghép tranh và chữ.' },
+]
+const ROLE_COLORS: Record<WorkerRole, string> = {
+  writer: '#dd5c3d', designer: '#d99b2b', artist: '#426b91',
+  reviewer: '#3f8178', editor: '#7d5c8d',
+}
 
 const STAGE_LABELS: Record<string, string> = {
   brief: 'Brief', planning: 'Lập kế hoạch', script: 'Kịch bản', character_design: 'Thiết kế',
@@ -62,6 +73,11 @@ function agentInfo(id: string, agents: ProjectAgent[] = []) {
   return custom ? { name: custom.name, role: custom.role, color: custom.color, mark: custom.name.slice(0, 2).toUpperCase() } : undefined
 }
 
+function agentLabel(id: string, agents: ProjectAgent[] = []) {
+  const agent = agentInfo(id, agents)
+  return agent ? `${agent.name} · ${agent.role}` : id
+}
+
 function AgentAvatar({ id, small = false, agents = [] }: { id: string; small?: boolean; agents?: ProjectAgent[] }) {
   const agent = agentInfo(id, agents)
   if (!agent) return <div className={`avatar ${small ? 'small' : ''} system`}>AI</div>
@@ -97,21 +113,59 @@ function HomePage({ projects, onCreate, onOpen }: { projects: Project[]; onCreat
 
 function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (p: Project) => void }) {
   const [prompt, setPrompt] = useState('')
+  const [agents, setAgents] = useState<CreateAgentInput[]>([])
+  const [showAgentForm, setShowAgentForm] = useState(false)
+  const [agentName, setAgentName] = useState('')
+  const [agentRole, setAgentRole] = useState<WorkerRole>('writer')
+  const [agentInstructions, setAgentInstructions] = useState('')
+  const [agentModel, setAgentModel] = useState('')
+  const [agentImageModel, setAgentImageModel] = useState('')
+  const [coreModels, setCoreModels] = useState<Partial<Record<AgentId, string>>>({})
+  const [modelOptions, setModelOptions] = useState(DEFAULT_TEXT_MODELS)
+  const [imageOptions, setImageOptions] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  useEffect(() => {
+    api.models().then(catalog => {
+      setModelOptions(catalog.models.length ? catalog.models : DEFAULT_TEXT_MODELS)
+      setImageOptions(catalog.image_model ? [catalog.image_model] : [])
+    }).catch(() => setModelOptions(DEFAULT_TEXT_MODELS))
+  }, [])
+  function addAgent() {
+    if (agentName.trim().length < 2 || agentInstructions.trim().length < 10) {
+      setError('Agent bổ sung cần có tên và hướng dẫn ít nhất 10 ký tự.'); return
+    }
+    if (agents.length >= 10) return setError('Mỗi dự án được thêm tối đa 10 agent.')
+    setAgents(items => [...items, {
+      name: agentName.trim(), role_key: agentRole, instructions: agentInstructions.trim(),
+      color: ROLE_COLORS[agentRole], model: agentModel || null, fallback_models: [],
+      image_model: ['designer', 'artist'].includes(agentRole) ? agentImageModel || null : null,
+    }])
+    setAgentName(''); setAgentRole('writer'); setAgentInstructions(''); setAgentModel('')
+    setAgentImageModel(''); setShowAgentForm(false); setError('')
+  }
   async function submit() {
     if (prompt.trim().length < 12) return setError('Hãy mô tả ý tưởng rõ hơn một chút.')
     setBusy(true); setError('')
-    try { onCreated(await api.create(prompt.trim())) } catch (e) { setError(e instanceof Error ? e.message : 'Không thể tạo dự án') } finally { setBusy(false) }
+    const coreAgentModels = (Object.keys(coreModels) as AgentId[])
+      .filter(agentId => Boolean(coreModels[agentId]))
+      .map(agentId => ({ agent_id: agentId, model: coreModels[agentId] }))
+    try { onCreated(await api.create(prompt.trim(), agents, coreAgentModels)) } catch (e) { setError(e instanceof Error ? e.message : 'Không thể tạo dự án') } finally { setBusy(false) }
   }
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}>
-    <section className="modal">
+    <section className="modal project-modal">
       <button className="icon-btn close" onClick={onClose}><X size={20} /></button>
       <p className="eyebrow">NEW PRODUCTION</p>
       <h2>Bạn muốn kể chuyện gì?</h2>
       <p>Chỉ cần một lệnh. Xưởng sẽ tự quyết định các chi tiết còn thiếu và làm đến khi có PDF.</p>
       <textarea autoFocus value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Ví dụ: Truyện 8 trang cho bé 7 tuổi về một chú rái cá sợ nước, vui nhộn, bài học về lòng can đảm…" />
       <div className="prompt-meta"><span>{prompt.length}/6000</span><span>Không cần điền thêm form</span></div>
+      <div className="project-crew-picker">
+        <div className="crew-picker-head"><div><strong>Đội agent của dự án</strong><span>6 agent mặc định luôn được sử dụng</span></div><button className="secondary" disabled={agents.length >= 10} onClick={() => setShowAgentForm(value => !value)}><UserPlus size={14} /> Thêm agent</button></div>
+        <div className="default-crew-row">{(Object.keys(AGENTS) as AgentId[]).map(id => <span key={id}><span><Check size={11} />{AGENTS[id].name} · {AGENTS[id].role}</span><select aria-label={`Model của ${AGENTS[id].name}`} value={coreModels[id] || ''} onChange={event => setCoreModels(current => ({ ...current, [id]: event.target.value }))}><option value="">Model mặc định ({modelOptions[0]})</option>{modelOptions.map(model => <option key={model} value={model}>{model}</option>)}</select></span>)}</div>
+        {agents.length > 0 && <div className="draft-agent-list">{agents.map((agent, index) => <div key={`${agent.name}-${index}`}><span style={{ background: agent.color }}>{agent.name.slice(0, 2).toUpperCase()}</span><div><strong>{agent.name}</strong><small>{WORKER_ROLES.find(item => item.key === agent.role_key)?.label} · {agent.model || 'Model mặc định'}</small></div><button disabled={busy} onClick={() => setAgents(items => items.filter((_, itemIndex) => itemIndex !== index))}><X size={13} /></button></div>)}</div>}
+        {showAgentForm && <div className="project-agent-form"><input value={agentName} onChange={event => setAgentName(event.target.value)} placeholder="Tên agent" /><select value={agentRole} onChange={event => { setAgentRole(event.target.value as WorkerRole); setAgentImageModel('') }}>{WORKER_ROLES.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}</select><select aria-label="Model chính" value={agentModel} onChange={event => setAgentModel(event.target.value)}><option value="">Model mặc định ({modelOptions[0]})</option>{modelOptions.map(model => <option key={model} value={model}>{model}</option>)}</select>{['designer', 'artist'].includes(agentRole) && <select aria-label="Model tạo ảnh" value={agentImageModel} onChange={event => setAgentImageModel(event.target.value)}><option value="">Model ảnh mặc định{imageOptions[0] ? ` (${imageOptions[0]})` : ''}</option>{imageOptions.map(model => <option key={model} value={model}>{model}</option>)}</select>}<textarea value={agentInstructions} onChange={event => setAgentInstructions(event.target.value)} placeholder="Hướng dẫn và kỹ năng của agent…" /><div><button className="secondary" onClick={() => setShowAgentForm(false)}>Hủy</button><button className="primary" onClick={addAgent}>Thêm vào dự án</button></div></div>}
+      </div>
       {error && <div className="form-error"><AlertTriangle size={16} />{error}</div>}
       <button className="primary full" disabled={busy} onClick={submit}>{busy ? <RefreshCw className="spin" size={18} /> : <Sparkles size={18} />}{busy ? 'Đang khởi động xưởng…' : 'Bắt đầu sản xuất'}<ArrowRight size={18} /></button>
     </section>
@@ -173,28 +227,92 @@ function Topbar({ project, tab, setTab, busy, onRetry, onPause, onResume, onStop
 
 function ProgressHero({ project }: { project: ProjectDetail }) {
   const active = project.tasks.find(t => t.status === 'in_progress' && t.item_type === 'subtask') || project.tasks.find(t => t.status === 'in_progress')
+  const orbitPoints: Record<AgentId | 'core', { x: number; y: number }> = {
+    pm: { x: 60, y: 42 }, writer: { x: 180, y: 27 }, designer: { x: 294, y: 65 },
+    artist: { x: 300, y: 174 }, reviewer: { x: 245, y: 211 }, editor: { x: 90, y: 210 },
+    core: { x: 180, y: 117 },
+  }
+  function orbitRole(value: unknown): AgentId | 'core' | undefined {
+    if (value === 'user' || value === 'system' || value === 'langgraph') return 'core'
+    if (typeof value !== 'string') return undefined
+    if (value in AGENTS) return value as AgentId
+    return project.agents.find(agent => agent.id === value)?.role_key
+  }
+  type OrbitConnection = { id: number; from: AgentId | 'core'; to: AgentId | 'core'; revision: boolean; active: boolean }
+  const connectionMap = new Map<string, OrbitConnection>()
+  project.events.slice(-30).forEach(event => {
+    if (event.event_type === 'testing_started') return
+    let from = orbitRole(event.agent)
+    let to = orbitRole(event.payload.to ?? event.payload.assigned_to)
+    if (!from || !to || from === to) return
+    const key = `${from}:${to}`
+    connectionMap.delete(key)
+    connectionMap.set(key, {
+      id: event.id, from, to,
+      revision: event.event_type.includes('revision') || event.event_type === 'testing_failed',
+      active: false,
+    })
+  })
+  const activeTests = project.quality_tests.filter(test => test.status === 'testing')
+  activeTests.forEach(test => {
+    const from = orbitRole(test.owner_agent); const to = orbitRole(test.reviewer_agent)
+    if (!from || !to || from === to) return
+    const key = `${from}:${to}`
+    connectionMap.delete(key)
+    connectionMap.set(key, { id: -test.id, from, to, revision: false, active: true })
+  })
+  const connections = [...connectionMap.values()].slice(-5)
+  function connectionPath(connection: OrbitConnection) {
+    const start = orbitPoints[connection.from]; const end = orbitPoints[connection.to]
+    if (connection.from === 'core' || connection.to === 'core') return `M ${start.x} ${start.y} L ${end.x} ${end.y}`
+    const middleX = (start.x + end.x) / 2; const middleY = (start.y + end.y) / 2
+    const radialX = middleX - orbitPoints.core.x; const radialY = middleY - orbitPoints.core.y
+    const radialLength = Math.hypot(radialX, radialY) || 1
+    const bend = connection.revision ? 28 : 18
+    const controlX = middleX + radialX / radialLength * bend
+    const controlY = middleY + radialY / radialLength * bend
+    return `M ${start.x} ${start.y} Q ${controlX.toFixed(1)} ${controlY.toFixed(1)} ${end.x} ${end.y}`
+  }
+  const reviewerActive = activeTests.length > 0
   return <section className="progress-hero">
     <div className="progress-copy"><p className="eyebrow">LIVE PRODUCTION</p><h2>{project.status === 'completed' ? 'Truyện đã sẵn sàng.' : project.status === 'stopped' ? 'Dự án đã tạm dừng.' : 'Cả xưởng đang chuyển động.'}</h2>
-      <p>{project.status === 'stopped' ? 'Bạn có thể tiếp tục từ bước hiện tại hoặc xóa dự án.' : active ? `${AGENTS[active.agent]?.role} đang xử lý “${active.title}”.` : project.error || 'List đang đồng bộ trạng thái.'}</p>
+      <p>{project.status === 'stopped' ? 'Bạn có thể tiếp tục từ bước hiện tại hoặc xóa dự án.' : active ? `${agentLabel(active.agent, project.agents)} đang xử lý “${active.title}”.` : project.error || 'List đang đồng bộ trạng thái.'}</p>
       <div className="progress-track"><div style={{ width: `${project.progress}%` }} /></div>
       <div className="progress-labels"><span>{STAGE_LABELS[project.stage] || project.stage}</span><span>{project.progress}%</span></div>
     </div>
-    <div className="agent-orbit"><svg className="communication-lines" viewBox="0 0 360 235" aria-hidden="true"><line x1="180" y1="117" x2="64" y2="38" /><line x1="180" y1="117" x2="298" y2="42" /><line x1="180" y1="117" x2="55" y2="182" /><line x1="180" y1="117" x2="309" y2="180" /><line x1="180" y1="117" x2="130" y2="221" /><line x1="180" y1="117" x2="236" y2="220" /></svg>{(Object.keys(AGENTS) as AgentId[]).map((id, i) => {
-      const task = project.tasks.find(t => t.agent === id)
-      return <div key={id} className={`orbit-agent orbit-${i} ${task?.status || 'todo'}`}><AgentAvatar id={id} small /><span>{AGENTS[id].role}</span>{task?.status === 'done' && <Check size={12} />}</div>
+    <div className="agent-orbit"><svg className="communication-lines" viewBox="0 0 360 235" aria-hidden="true">{connections.map((connection, index) => {
+      const path = connectionPath(connection)
+      return <g key={connection.id} className={`${connection.revision ? 'revision-link' : 'handoff-link'} ${connection.active ? 'active-link' : ''}`}><path d={path} /><circle className="message-particle" r={connection.active ? 3.4 : 2.7}><animateMotion dur={`${1.1 + index * 0.07}s`} repeatCount="indefinite" path={path} /></circle></g>
+    })}</svg>{(Object.keys(AGENTS) as AgentId[]).map(id => {
+      const agentTasks = project.tasks.filter(t => t.agent === id)
+      const task = agentTasks.find(t => t.status === 'in_progress') || agentTasks.find(t => t.status === 'testing') || agentTasks.at(-1)
+      const visualStatus = id === 'reviewer' && reviewerActive ? 'testing' : task?.status || 'todo'
+      const point = orbitPoints[id]
+      return <div key={id} className={`orbit-agent ${visualStatus}`} style={{ left: `${point.x / 3.6}%`, top: `${point.y / 2.35}%` }}><AgentAvatar id={id} small /><span>{AGENTS[id].role}</span>{visualStatus === 'done' && <Check size={12} />}</div>
     })}<div className="orbit-core"><Bot size={28} /><span>LANGGRAPH</span></div></div>
   </section>
 }
 
-function AgentGrid({ tasks }: { tasks: Task[] }) {
-  return <section><div className="section-title"><div><p className="eyebrow">THE CREW</p><h3>Tiến độ từng agent</h3></div><span>6 vị trí · Testing độc lập</span></div>
-    <div className="agent-grid">{(Object.keys(AGENTS) as AgentId[]).map(id => {
-      const agent = AGENTS[id]; const agentTasks = tasks.filter(t => t.agent === id); const current = agentTasks.find(t => t.status === 'in_progress' && t.item_type === 'subtask') || agentTasks.find(t => t.status === 'in_progress') || agentTasks.at(-1)
+function AgentGrid({ tasks, agents, qualityTests }: { tasks: Task[]; agents: ProjectAgent[]; qualityTests: QualityTest[] }) {
+  const crew = agents.filter(agent => agent.enabled)
+  return <section><div className="section-title"><div><p className="eyebrow">THE CREW</p><h3>Tiến độ từng agent</h3></div><span>{crew.length} agent · quản lý theo tên và vai trò</span></div>
+    <div className="agent-grid">{crew.map(agent => {
+      const id = agent.is_core ? agent.key : agent.id; const agentTasks = tasks.filter(t => t.agent === id); const current = agentTasks.find(t => t.status === 'in_progress' && t.item_type === 'subtask') || agentTasks.find(t => t.status === 'testing') || agentTasks.find(t => t.status === 'in_progress') || agentTasks.at(-1)
       const done = agentTasks.filter(t => t.status === 'done').length; const pct = agentTasks.length ? Math.round(done / agentTasks.length * 100) : 0
-      return <article className={`agent-card ${current?.status || 'todo'}`} key={id} style={{ '--agent': agent.color } as React.CSSProperties}>
-        <div className="agent-card-head"><AgentAvatar id={id} /><span className={statusClass(current?.status || 'todo')}>{current?.status === 'in_progress' ? 'Đang làm' : current?.status === 'done' ? 'Xong' : 'Chờ'}</span></div>
-        <h4>{agent.name}</h4><p>{agent.role}</p><div className="mini-progress"><i style={{ width: `${current?.status === 'in_progress' ? 64 : pct}%` }} /></div>
-        <small>{current?.detail || current?.title || 'Chờ PM giao task'}</small>
+      const reviewerTests = qualityTests.filter(test => test.reviewer_agent === id)
+      const activeReviews = reviewerTests.filter(test => test.status === 'testing')
+      const completedReviews = reviewerTests.filter(test => test.status === 'completed').length
+      const isReviewing = activeReviews.length > 0
+      const reviewPct = reviewerTests.length ? Math.round((completedReviews + activeReviews.length * 0.5) / reviewerTests.length * 100) : 0
+      const visualStatus = isReviewing ? 'testing' : current?.status || 'todo'
+      const progress = reviewerTests.length ? reviewPct : current?.status === 'in_progress' ? 64 : pct
+      const detail = isReviewing
+        ? `Đang kiểm tra “${activeReviews.at(-1)?.title}” · ${completedReviews}/${reviewerTests.length} đầu ra đã duyệt`
+        : reviewerTests.length ? `${completedReviews}/${reviewerTests.length} đầu ra đã kiểm duyệt` : current?.detail || current?.title || 'Chờ PM giao task'
+      return <article className={`agent-card ${visualStatus}`} key={agent.id} style={{ '--agent': agent.color } as React.CSSProperties}>
+        <div className="agent-card-head"><AgentAvatar id={id} agents={agents} /><span className={statusClass(visualStatus)}>{visualStatus === 'in_progress' ? 'Đang làm' : visualStatus === 'testing' ? 'Đang kiểm duyệt' : visualStatus === 'done' ? 'Xong' : 'Chờ'}</span></div>
+        <h4>{agent.name}</h4><p>{agent.role}</p><div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
+        <small>{detail}</small>
       </article>
     })}</div>
   </section>
@@ -203,13 +321,13 @@ function AgentGrid({ tasks }: { tasks: Task[] }) {
 function ActivityFeed({ events, agents = [], compact = false }: { events: EventItem[]; agents?: ProjectAgent[]; compact?: boolean }) {
   const shown = compact ? events.slice(-7).reverse() : events.slice().reverse()
   return <div className={`activity-feed ${compact ? 'compact' : ''}`}>{shown.map(event => <div className="event-row" key={event.id}>
-    <AgentAvatar id={event.agent} agents={agents} small /><div className="event-body"><div><strong>{agentInfo(event.agent, agents)?.role || event.agent}</strong><time>{formatTime(event.created_at)}</time></div><p>{event.message}</p><span className="event-kind">{event.event_type.replaceAll('_', ' ')}</span></div>
+    <AgentAvatar id={event.agent} agents={agents} small /><div className="event-body"><div><strong>{agentLabel(event.agent, agents)}</strong><time>{formatTime(event.created_at)}</time></div><p>{event.message}</p><span className="event-kind">{event.event_type.replaceAll('_', ' ')}</span></div>
   </div>)}{shown.length === 0 && <div className="empty-list">Chưa có tin nhắn.</div>}</div>
 }
 
 function Overview({ project }: { project: ProjectDetail }) {
   const finished = project.tasks.filter(t => t.status === 'done').length
-  return <div className="page-grid"><div className="main-col"><ProgressHero project={project} /><AgentGrid tasks={project.tasks} /></div><aside className="right-col">
+  return <div className="page-grid"><div className="main-col"><ProgressHero project={project} /><AgentGrid tasks={project.tasks} agents={project.agents} qualityTests={project.quality_tests} /></div><aside className="right-col">
     <div className="metric-grid"><div><span>WORK ITEMS</span><strong>{project.tasks.length}</strong><small>{finished} hoàn tất</small></div><div><span>ARTIFACTS</span><strong>{project.artifacts.length}</strong><small>đã tạo</small></div></div>
     <section className="side-panel"><div className="panel-head"><h3>Luồng trực tiếp</h3><Activity size={17} /></div><ActivityFeed events={project.events} agents={project.agents} compact /><button className="text-button">Xem toàn bộ giao tiếp <ArrowRight size={14} /></button></section>
     <section className="brief-card"><span>BRIEF GỐC</span><p>“{project.prompt}”</p></section>
@@ -249,7 +367,7 @@ function TaskList({ project }: { project: ProjectDetail }) {
   const normalizedSearch = search.trim().toLocaleLowerCase('vi')
   const visibleRoots = roots.filter(task => {
     const children = subtasks.filter(item => item.parent_id === task.id)
-    const matchesText = !normalizedSearch || [task.title, task.detail, agentInfo(task.agent, agents)?.role, ...children.flatMap(item => [item.title, item.detail])].some(value => value?.toLocaleLowerCase('vi').includes(normalizedSearch))
+    const matchesText = !normalizedSearch || [task.title, task.detail, agentLabel(task.agent, agents), ...children.flatMap(item => [item.title, item.detail, agentLabel(item.agent, agents)])].some(value => value?.toLocaleLowerCase('vi').includes(normalizedSearch))
     return matchesText && (filter === 'all' || workState(task) === filter)
   })
   const finished = subtasks.filter(task => task.status === 'done').length
@@ -268,13 +386,13 @@ function TaskList({ project }: { project: ProjectDetail }) {
       const children = subtasks.filter(item => item.parent_id === task.id)
       return <article className={`task-list-group ${state}`} key={task.id} style={{ '--agent': agentInfo(task.agent, agents)?.color || '#557a68' } as React.CSSProperties}>
         <div className="task-main-row">
-          <div className="task-main-info"><AgentAvatar id={task.agent} agents={agents} /><div><span className="task-key">{task.id.toUpperCase()}</span><h3>{task.title}</h3><p>{task.detail}</p><small>{agentInfo(task.agent, agents)?.role || 'Agent'} · {children.length} subtask{task.depends_on.length > 0 ? ` · Phụ thuộc ${task.depends_on.join(', ')}` : ''}</small></div></div>
+          <div className="task-main-info"><AgentAvatar id={task.agent} agents={agents} /><div><span className="task-key">{task.id.toUpperCase()}</span><h3>{task.title}</h3><p>{task.detail}</p><small>{agentLabel(task.agent, agents)} · {children.length} subtask{task.depends_on.length > 0 ? ` · Phụ thuộc ${task.depends_on.join(', ')}` : ''}</small></div></div>
           <span className={statusClass(state)}><i />{taskStatusLabel(state)}</span>
           <time><Clock3 size={13} />{formatTime(task.due_at)}</time>
         </div>
         {children.length > 0 && <div className="subtask-list">{children.map((child, index) => {
           const childState = workState(child)
-          return <div className={`subtask-row ${childState}`} key={child.id}><div className="subtask-tree"><i />{childState === 'done' ? <Check size={14} /> : childState === 'in_progress' ? <RefreshCw className="spin" size={13} /> : childState === 'blocked' ? <LockKeyhole size={12} /> : <Circle size={12} />}<div><span>SUBTASK {String(index + 1).padStart(2, '0')}</span><strong>{child.title}</strong><small>{child.detail}</small></div></div><span className={statusClass(childState)}><i />{taskStatusLabel(childState)}</span><time>{formatTime(child.due_at)}</time></div>
+          return <div className={`subtask-row ${childState}`} key={child.id}><div className="subtask-tree"><i />{childState === 'done' ? <Check size={14} /> : childState === 'in_progress' ? <RefreshCw className="spin" size={13} /> : childState === 'blocked' ? <LockKeyhole size={12} /> : <Circle size={12} />}<AgentAvatar id={child.agent} agents={agents} small /><div><span>SUBTASK {String(index + 1).padStart(2, '0')} · {agentLabel(child.agent, agents)}</span><strong>{child.title}</strong><small>{child.detail}</small></div></div><span className={statusClass(childState)}><i />{taskStatusLabel(childState)}</span><time>{formatTime(child.due_at)}</time></div>
         })}</div>}
       </article>
     })}</div></section>)}{visibleRoots.length === 0 && <div className="empty-list">Không có công việc phù hợp bộ lọc.</div>}</div>
@@ -286,7 +404,7 @@ function Schedule({ tasks, agents }: { tasks: Task[]; agents: ProjectAgent[] }) 
   return <section className="workspace"><div className="workspace-title"><div><p className="eyebrow">AUTO SCHEDULE</p><h2>Lịch sản xuất</h2></div><span><CalendarDays size={15} /> Timeline theo dependency</span></div>
     <div className="timeline"><div className="timeline-head"><span>WORK ITEM / OWNER</span><div><i>START</i><i>MIDDLE</i><i>DONE</i></div></div>{sorted.map(task => {
       const left = ((+new Date(task.start_at) - min) / span) * 86; const width = Math.max(7, ((+new Date(task.due_at) - +new Date(task.start_at)) / span) * 86)
-      return <div className="timeline-row" key={task.id}><div className="timeline-label"><AgentAvatar id={task.agent} agents={agents} small /><div><strong>{task.title}</strong><span>{agentInfo(task.agent, agents)?.role || 'Agent'}</span></div></div><div className="timeline-track"><div className={`timeline-bar ${task.status}`} style={{ left: `${left + 2}%`, width: `${width}%`, background: agentInfo(task.agent, agents)?.color || '#557a68' }}><span>{task.status === 'done' ? '✓' : task.status === 'in_progress' ? 'LIVE' : ''}</span></div></div></div>
+      return <div className="timeline-row" key={task.id}><div className="timeline-label"><AgentAvatar id={task.agent} agents={agents} small /><div><strong>{task.title}</strong><span>{agentLabel(task.agent, agents)}</span></div></div><div className="timeline-track"><div className={`timeline-bar ${task.status}`} style={{ left: `${left + 2}%`, width: `${width}%`, background: agentInfo(task.agent, agents)?.color || '#557a68' }}><span>{task.status === 'done' ? '✓' : task.status === 'in_progress' ? 'LIVE' : ''}</span></div></div></div>
     })}</div>
   </section>
 }
@@ -432,7 +550,7 @@ function Messages({ project, onChanged }: { project: ProjectDetail; onChanged: (
       const opened = openId === event.id
       return <div className={`event-row message-event ${opened ? 'open' : ''}`} key={event.id}>
         <button className="message-summary" onClick={() => toggleEvent(event)}>
-          <AgentAvatar id={event.agent} agents={project.agents} small /><div className="event-body"><div><strong>{agentInfo(event.agent, project.agents)?.role || event.agent}</strong><time>{formatTime(event.created_at)}</time></div><p>{event.message}</p><span className="event-kind">{event.event_type.replaceAll('_', ' ')}</span></div>
+          <AgentAvatar id={event.agent} agents={project.agents} small /><div className="event-body"><div><strong>{agentLabel(event.agent, project.agents)}</strong><time>{formatTime(event.created_at)}</time></div><p>{event.message}</p><span className="event-kind">{event.event_type.replaceAll('_', ' ')}</span></div>
           {approval && <span className={`approval-tag ${approval.status}`}>{approval.status === 'pending' ? 'Chờ duyệt' : approval.status === 'approved' ? 'Đã duyệt' : 'Đã yêu cầu sửa'}</span>}<ChevronDown className="message-chevron" size={17} />
         </button>
         {opened && <div className="message-detail">
@@ -455,12 +573,13 @@ function Messages({ project, onChanged }: { project: ProjectDetail; onChanged: (
 function AgentManagement({ project, onChanged }: { project: ProjectDetail; onChanged: () => Promise<void> }) {
   const [showForm, setShowForm] = useState(false)
   const [name, setName] = useState('')
-  const [role, setRole] = useState('')
+  const [role, setRole] = useState<WorkerRole>('writer')
   const [instructions, setInstructions] = useState('')
   const [color, setColor] = useState('#557a68')
   const [newModel, setNewModel] = useState('')
   const [newFallbacks, setNewFallbacks] = useState<string[]>([])
   const [newTemperature, setNewTemperature] = useState('')
+  const [newImageModel, setNewImageModel] = useState('')
   const [busy, setBusy] = useState('')
   const [formError, setFormError] = useState('')
   const [modelAgentId, setModelAgentId] = useState('')
@@ -470,8 +589,11 @@ function AgentManagement({ project, onChanged }: { project: ProjectDetail; onCha
   const [temperature, setTemperature] = useState('')
   const [modelOptions, setModelOptions] = useState(DEFAULT_TEXT_MODELS)
   const [imageOptions, setImageOptions] = useState<string[]>([])
+  const [renameAgentId, setRenameAgentId] = useState('')
+  const [renameValue, setRenameValue] = useState('')
   const coreAgents = project.agents.filter(agent => agent.is_core)
   const customAgents = project.agents.filter(agent => !agent.is_core)
+  const canAddAgent = project.status === 'paused'
 
   useEffect(() => {
     api.models().then(catalog => {
@@ -515,19 +637,20 @@ function AgentManagement({ project, onChanged }: { project: ProjectDetail; onCha
   }
 
   async function createAgent() {
-    if (name.trim().length < 2 || role.trim().length < 2 || instructions.trim().length < 10) {
-      setFormError('Hãy nhập tên, vai trò và hướng dẫn ít nhất 10 ký tự.')
+    if (name.trim().length < 2 || instructions.trim().length < 10) {
+      setFormError('Hãy nhập tên và hướng dẫn ít nhất 10 ký tự.')
       return
     }
     setBusy('create'); setFormError('')
     try {
       await api.createAgent(project.id, {
-        name: name.trim(), role: role.trim(), instructions: instructions.trim(), color,
+        name: name.trim(), role_key: role, instructions: instructions.trim(), color,
         model: newModel || null, fallback_models: newFallbacks,
+        image_model: ['designer', 'artist'].includes(role) ? newImageModel || null : null,
         temperature: newTemperature.trim() ? Number(newTemperature) : null,
       })
-      setName(''); setRole(''); setInstructions(''); setColor('#557a68')
-      setNewModel(''); setNewFallbacks([]); setNewTemperature(''); setShowForm(false)
+      setName(''); setRole('writer'); setInstructions(''); setColor('#557a68')
+      setNewModel(''); setNewFallbacks([]); setNewTemperature(''); setNewImageModel(''); setShowForm(false)
       await onChanged()
     } catch (error) { setFormError(error instanceof Error ? error.message : 'Không thể tạo agent') } finally { setBusy('') }
   }
@@ -543,23 +666,42 @@ function AgentManagement({ project, onChanged }: { project: ProjectDetail; onCha
     try { await api.removeAgent(project.id, agentId); await onChanged() } finally { setBusy('') }
   }
 
+  function openRename(agent: ProjectAgent) {
+    if (agent.is_core) return
+    setRenameAgentId(agent.id); setRenameValue(agent.name); setFormError('')
+  }
+
+  async function saveRename() {
+    const nextName = renameValue.trim()
+    if (!renameAgentId || nextName.length < 2) {
+      setFormError('Tên agent phải có ít nhất 2 ký tự.')
+      return
+    }
+    setBusy(renameAgentId); setFormError('')
+    try {
+      await api.updateAgent(project.id, renameAgentId, { name: nextName })
+      setRenameAgentId(''); setRenameValue(''); await onChanged()
+    } catch (reason) { setFormError(reason instanceof Error ? reason.message : 'Không thể đổi tên agent') } finally { setBusy('') }
+  }
+
   return <section className="workspace agents-workspace">
-    <div className="workspace-title"><div><p className="eyebrow">PROJECT CREW</p><h2>Quản lý agent</h2></div><button className="primary add-agent-button" onClick={() => setShowForm(value => !value)}><UserPlus size={16} /> Thêm agent</button></div>
-    <div className="agent-policy"><ShieldCheck size={19} /><div><strong>6 agent lõi luôn được giữ nguyên</strong><span>Agent Kiểm duyệt chạy Testing độc lập; agent thêm mới hoạt động như chuyên gia tư vấn.</span></div><b>{project.agents.length} agent</b></div>
+    <div className="workspace-title"><div><p className="eyebrow">PROJECT CREW</p><h2>Quản lý agent</h2></div><button className="primary add-agent-button" disabled={!canAddAgent} title={canAddAgent ? 'Thêm agent hỗ trợ' : 'Tạm dừng dự án trước khi thêm agent'} onClick={() => setShowForm(value => !value)}><UserPlus size={16} /> Thêm agent</button></div>
+    <div className="agent-policy"><ShieldCheck size={19} /><div><strong>Workflow 6 vai trò được giữ nguyên</strong><span>Agent bổ sung là worker cùng vai trò; PM chia việc theo tên và có thể chạy song song.</span></div><b>{project.agents.length} agent</b></div>
+    {!canAddAgent && <div className="agent-manage-lock"><LockKeyhole size={16} /><span><strong>Đang khóa thao tác thêm mới.</strong> Tạm dừng dự án nếu muốn thêm agent. Đổi model, đổi tên, bật/tắt và xóa agent hỗ trợ vẫn dùng được.</span></div>}
     {modelAgentId && <div className="model-form">
       <div className="agent-form-head"><div><p className="eyebrow">MODEL ROUTING</p><h3>Cấu hình model · {project.agents.find(agent => agent.id === modelAgentId)?.name}</h3></div><button className="icon-btn" onClick={() => setModelAgentId('')}><X size={18} /></button></div>
       <div className="model-form-grid"><label><span>Model chính</span><select value={primaryModel} onChange={event => { setPrimaryModel(event.target.value); setFallbackModels(items => items.filter(item => item !== event.target.value)) }}><option value="">Mặc định hệ thống ({modelOptions[0]})</option>{modelOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label><label><span>Độ sáng tạo</span><input type="number" min="0" max="2" step="0.05" value={temperature} onChange={event => setTemperature(event.target.value)} placeholder="Mặc định theo vai trò" /></label></div>
       <div className="model-choice-field"><span>Model dự phòng</span><div className="model-choice-list">{modelOptions.filter(model => model !== primaryModel).map(model => <label key={model} className={fallbackModels.includes(model) ? 'selected' : ''}><input type="checkbox" checked={fallbackModels.includes(model)} onChange={() => toggleModel(fallbackModels, setFallbackModels, model)} />{model}</label>)}</div></div>
-      {['designer', 'artist'].includes(project.agents.find(agent => agent.id === modelAgentId)?.key || '') && <label className="model-image-field"><span>Model tạo ảnh</span><select value={imageModel} onChange={event => setImageModel(event.target.value)}><option value="">Mặc định hệ thống{imageOptions[0] ? ` (${imageOptions[0]})` : ''}</option>{imageOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label>}
+      {['designer', 'artist'].includes(project.agents.find(agent => agent.id === modelAgentId)?.role_key || '') && <label className="model-image-field"><span>Model tạo ảnh</span><select value={imageModel} onChange={event => setImageModel(event.target.value)}><option value="">Mặc định hệ thống{imageOptions[0] ? ` (${imageOptions[0]})` : ''}</option>{imageOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label>}
       <p className="model-note">Thứ tự gọi: model chính → các model dự phòng. Hệ thống chỉ chuyển model khi hết quota hoặc token.</p>
       {formError && <div className="form-error"><AlertTriangle size={16} />{formError}</div>}
       <div className="agent-form-actions"><button className="secondary" disabled={busy === 'models'} onClick={resetModels}>Đặt mặc định</button><button className="primary" disabled={busy === 'models'} onClick={saveModels}>{busy === 'models' ? <RefreshCw className="spin" size={16} /> : <Save size={16} />} Lưu model</button></div>
     </div>}
-    {showForm && <div className="agent-form">
-      <div className="agent-form-head"><div><p className="eyebrow">NEW SPECIALIST</p><h3>Tạo agent chuyên gia</h3></div><button className="icon-btn" onClick={() => setShowForm(false)}><X size={18} /></button></div>
-      <div className="agent-form-grid"><label><span>Tên agent</span><input value={name} onChange={event => setName(event.target.value)} placeholder="Ví dụ: Mai" /></label><label><span>Vai trò</span><input value={role} onChange={event => setRole(event.target.value)} placeholder="Cố vấn văn hóa" /></label><label className="color-field"><span>Màu nhận diện</span><input type="color" value={color} onChange={event => setColor(event.target.value)} /></label></div>
-      <label className="instruction-field"><span>Hướng dẫn và kỹ năng</span><textarea value={instructions} onChange={event => setInstructions(event.target.value)} placeholder="Mô tả chuyên môn, phạm vi được phép tư vấn và những điều agent phải kiểm tra…" /></label>
-      <div className="new-agent-models"><div className="agent-form-grid"><label><span>Model chính</span><select value={newModel} onChange={event => { setNewModel(event.target.value); setNewFallbacks(items => items.filter(item => item !== event.target.value)) }}><option value="">Mặc định hệ thống ({modelOptions[0]})</option>{modelOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label><label><span>Độ sáng tạo</span><input type="number" min="0" max="2" step="0.05" value={newTemperature} onChange={event => setNewTemperature(event.target.value)} placeholder="Mặc định: 0.35" /></label></div><div className="model-choice-field"><span>Model dự phòng</span><div className="model-choice-list">{modelOptions.filter(model => model !== newModel).map(model => <label key={model} className={newFallbacks.includes(model) ? 'selected' : ''}><input type="checkbox" checked={newFallbacks.includes(model)} onChange={() => toggleModel(newFallbacks, setNewFallbacks, model)} />{model}</label>)}</div></div></div>
+    {showForm && canAddAgent && <div className="agent-form">
+      <div className="agent-form-head"><div><p className="eyebrow">NEW ROLE WORKER</p><h3>Thêm agent hỗ trợ</h3></div><button className="icon-btn" onClick={() => setShowForm(false)}><X size={18} /></button></div>
+      <div className="agent-form-grid"><label><span>Tên agent</span><input value={name} onChange={event => setName(event.target.value)} placeholder="Ví dụ: Mai" /></label><label><span>Vai trò hỗ trợ</span><select value={role} onChange={event => { setRole(event.target.value as WorkerRole); setNewImageModel('') }}>{WORKER_ROLES.map(item => <option value={item.key} key={item.key}>{item.label}</option>)}</select><small>{WORKER_ROLES.find(item => item.key === role)?.help}</small></label><label className="color-field"><span>Màu nhận diện</span><input type="color" value={color} onChange={event => setColor(event.target.value)} /></label></div>
+      <label className="instruction-field"><span>Hướng dẫn và kỹ năng</span><textarea value={instructions} onChange={event => setInstructions(event.target.value)} placeholder="Mô tả phần việc agent này ưu tiên, phong cách và những điều phải kiểm tra…" /></label>
+      <div className="new-agent-models"><div className="agent-form-grid"><label><span>Model chính</span><select value={newModel} onChange={event => { setNewModel(event.target.value); setNewFallbacks(items => items.filter(item => item !== event.target.value)) }}><option value="">Mặc định hệ thống ({modelOptions[0]})</option>{modelOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label><label><span>Độ sáng tạo</span><input type="number" min="0" max="2" step="0.05" value={newTemperature} onChange={event => setNewTemperature(event.target.value)} placeholder="Mặc định theo vai trò" /></label></div>{['designer', 'artist'].includes(role) && <label className="model-image-field"><span>Model tạo ảnh</span><select value={newImageModel} onChange={event => setNewImageModel(event.target.value)}><option value="">Mặc định hệ thống{imageOptions[0] ? ` (${imageOptions[0]})` : ''}</option>{imageOptions.map(model => <option value={model} key={model}>{model}</option>)}</select></label>}<div className="model-choice-field"><span>Model dự phòng</span><div className="model-choice-list">{modelOptions.filter(model => model !== newModel).map(model => <label key={model} className={newFallbacks.includes(model) ? 'selected' : ''}><input type="checkbox" checked={newFallbacks.includes(model)} onChange={() => toggleModel(newFallbacks, setNewFallbacks, model)} />{model}</label>)}</div></div></div>
       {formError && <div className="form-error"><AlertTriangle size={16} />{formError}</div>}
       <div className="agent-form-actions"><button className="secondary" onClick={() => setShowForm(false)}>Hủy</button><button className="primary" disabled={busy === 'create'} onClick={createAgent}>{busy === 'create' ? <RefreshCw className="spin" size={16} /> : <UserPlus size={16} />} Tạo agent</button></div>
     </div>}
@@ -567,19 +709,19 @@ function AgentManagement({ project, onChanged }: { project: ProjectDetail; onCha
     <div className="management-agent-grid">{coreAgents.map(agent => <article className="management-agent-card core" key={agent.id} style={{ '--agent': agent.color } as React.CSSProperties}>
       <div className="management-agent-head"><AgentAvatar id={agent.key} /><div className="agent-card-actions"><button className="model-button" onClick={() => openModelEditor(agent)} title="Cấu hình model"><Settings2 size={14} /></button><span className="core-badge"><ShieldCheck size={12} /> Mặc định</span></div></div><h3>{agent.name}</h3><strong>{agent.role}</strong><p>{agent.instructions}</p><span className="model-summary">{agent.model || 'Model mặc định hệ thống'}</span>
     </article>)}</div>
-    <div className="agent-group-head custom-head"><div><h3>Agent bổ sung</h3><span>{customAgents.length}/10 chuyên gia</span></div></div>
+    <div className="agent-group-head custom-head"><div><h3>Agent hỗ trợ theo vai trò</h3><span>{customAgents.length}/10 worker</span></div></div>
     {customAgents.length > 0 ? <div className="management-agent-grid">{customAgents.map(agent => <article className={`management-agent-card custom ${agent.enabled ? '' : 'disabled'}`} key={agent.id} style={{ '--agent': agent.color } as React.CSSProperties}>
-      <div className="management-agent-head"><div className="custom-agent-avatar" style={{ background: agent.color }}>{agent.name.slice(0, 2).toUpperCase()}</div><div className="agent-card-actions"><button className="model-button" onClick={() => openModelEditor(agent)} title="Cấu hình model"><Settings2 size={14} /></button><button disabled={busy === agent.id} className={`power-button ${agent.enabled ? 'enabled' : ''}`} onClick={() => toggleAgent(agent.id, !agent.enabled)} title={agent.enabled ? 'Tạm ngưng' : 'Kích hoạt'}><Power size={14} /></button><button disabled={busy === agent.id} className="remove-agent-button" onClick={() => removeAgent(agent.id, agent.name)} title="Xóa agent"><Trash2 size={14} /></button></div></div>
-      <h3>{agent.name}</h3><strong>{agent.role}</strong><p>{agent.instructions}</p><span className="model-summary">{agent.model || 'Model mặc định hệ thống'}</span><span className="agent-state"><i />{agent.enabled ? 'Sẵn sàng tham gia dự án' : 'Đang tạm ngưng'}</span>
-    </article>)}</div> : <div className="empty-custom-agents"><Bot size={28} /><h3>Chưa có agent bổ sung</h3><p>Thêm chuyên gia khi dự án cần kiến thức hoặc bước kiểm tra riêng.</p></div>}
+      <div className="management-agent-head"><div className="custom-agent-avatar" style={{ background: agent.color }}>{agent.name.slice(0, 2).toUpperCase()}</div><div className="agent-card-actions"><button className="model-button" onClick={() => openModelEditor(agent)} title="Cấu hình model"><Settings2 size={14} /></button><button disabled={busy === agent.id} className="rename-agent-button" onClick={() => openRename(agent)} title="Đổi tên agent"><Pencil size={14} /></button><button disabled={busy === agent.id} className={`power-button ${agent.enabled ? 'enabled' : ''}`} onClick={() => toggleAgent(agent.id, !agent.enabled)} title={agent.enabled ? 'Tạm ngưng' : 'Kích hoạt'}><Power size={14} /></button><button disabled={busy === agent.id} className="remove-agent-button" onClick={() => removeAgent(agent.id, agent.name)} title="Xóa agent"><Trash2 size={14} /></button></div></div>
+      {renameAgentId === agent.id ? <div className="agent-rename-form"><input autoFocus value={renameValue} maxLength={60} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') saveRename(); if (event.key === 'Escape') setRenameAgentId('') }} /><button className="secondary" onClick={() => setRenameAgentId('')}>Hủy</button><button className="primary" disabled={busy === agent.id || renameValue.trim().length < 2} onClick={saveRename}><Save size={13} /> Lưu</button></div> : <h3>{agent.name}</h3>}<strong>{agent.role}</strong><p>{agent.instructions}</p><span className="model-summary">{agent.model || 'Model mặc định hệ thống'}</span><span className="agent-state"><i />{agent.enabled ? 'Sẵn sàng tham gia dự án' : 'Đang tạm ngưng'}</span>
+    </article>)}</div> : <div className="empty-custom-agents"><Bot size={28} /><h3>Chưa có agent hỗ trợ</h3><p>Thêm worker cùng vai trò để PM chia việc và chạy song song.</p></div>}
   </section>
 }
 
 function artifactIcon(item: Artifact) { return item.kind.includes('image') || item.kind.includes('page') || item.kind.includes('cover') ? FileImage : item.kind === 'final_pdf' ? FileText : FileText }
-function Artifacts({ artifacts }: { artifacts: Artifact[] }) {
+function Artifacts({ artifacts, agents }: { artifacts: Artifact[]; agents: ProjectAgent[] }) {
   return <section className="workspace"><div className="workspace-title"><div><p className="eyebrow">OUTPUT LIBRARY</p><h2>Sản phẩm của xưởng</h2></div><span>{artifacts.length} tệp</span></div><div className="artifact-grid">{artifacts.map(item => {
     const Icon = artifactIcon(item); const isImage = /\.(png|jpg|jpeg|webp)$/i.test(item.url)
-    return <article className="artifact-card" key={item.id}>{isImage ? <div className="artifact-preview" style={{ backgroundImage: `url(${api.artifact(item.url)})` }} /> : <div className="artifact-file"><Icon size={34} /></div>}<div className="artifact-info"><span>{item.kind.replaceAll('_', ' ')}</span><h4>{item.name}</h4><div><AgentAvatar id={item.agent} small /><a href={api.artifact(item.url)} target="_blank" rel="noreferrer"><Download size={15} /> Tải xuống</a></div></div></article>
+    return <article className="artifact-card" key={item.id}>{isImage ? <div className="artifact-preview" style={{ backgroundImage: `url(${api.artifact(item.url)})` }} /> : <div className="artifact-file"><Icon size={34} /></div>}<div className="artifact-info"><span>{item.kind.replaceAll('_', ' ')}</span><h4>{item.name}</h4><div><AgentAvatar id={item.agent} agents={agents} small /><a href={api.artifact(item.url)} target="_blank" rel="noreferrer"><Download size={15} /> Tải xuống</a></div></div></article>
   })}{artifacts.length === 0 && <div className="empty-artifacts"><GalleryVerticalEnd size={34} /><h3>Artifact sẽ xuất hiện ở đây</h3><p>Các agent đang chuẩn bị những file đầu tiên.</p></div>}</div></section>
 }
 
@@ -606,7 +748,7 @@ function RouterModels() {
   function move(index: number, direction: -1 | 1) {
     const target = index + direction
     if (target < 0 || target >= models.length) return
-    setModels(items => { const next = [...items]; [next[index], next[target]] = [next[target], next[index]]; return next })
+    setModels(items => { const next = [...items];[next[index], next[target]] = [next[target], next[index]]; return next })
   }
 
   function addModel() {
@@ -695,7 +837,7 @@ export default function App() {
   }
   return <div className="app-shell"><Sidebar projects={projects} selected={selected} systemPage={systemPage} onSelect={openProject} onCreate={() => setModal(true)} onHome={goHome} onModels={openModels} /><div className="app-main">
     {error && <div className="api-error"><AlertTriangle size={16} />{error}<button onClick={() => { refreshList(); refreshDetail() }}>Thử lại</button></div>}
-    {systemPage === 'models' ? <RouterModels /> : !selected ? <HomePage projects={projects} onCreate={() => setModal(true)} onOpen={openProject} /> : detail ? <><Topbar project={detail} tab={tab} setTab={changeTab} busy={actionBusy} onRetry={retryProject} onPause={pauseProject} onResume={resumeProject} onStop={stopProject} onDelete={() => setDeleteModal(true)} onHome={goHome} /><div className="content">{detail.status === 'failed' && <div className="workflow-error"><AlertTriangle size={19} /><div><strong>Quy trình đã dừng ở {detail.progress}%</strong><span>{detail.error || 'Agent gặp lỗi không thể tự phục hồi.'}</span></div><button disabled={actionBusy} onClick={retryProject}><Play size={15} /> Tiếp tục từ bước này</button></div>}{detail.status === 'paused' && <div className="workflow-paused"><Pause size={19} /><div><strong>Dự án đã tạm dừng an toàn</strong><span>Bạn có thể mở tab Giao tiếp để chỉnh sửa hoặc giao agent làm lại, sau đó bấm Tiếp tục.</span></div></div>}{detail.status === 'awaiting_approval' && <div className="workflow-approval"><ShieldCheck size={19} /><div><strong>Đang chờ bạn duyệt nội dung</strong><span>Mở tin nhắn có nhãn “Chờ duyệt” trong tab Giao tiếp.</span></div><button onClick={() => changeTab('messages')}>Mở giao tiếp</button></div>}{tab === 'overview' && <Overview project={detail} />}{tab === 'list' && <TaskList project={detail} />}{tab === 'schedule' && <Schedule tasks={detail.tasks} agents={detail.agents} />}{tab === 'messages' && <Messages project={detail} onChanged={refreshDetail} />}{tab === 'agents' && <AgentManagement project={detail} onChanged={refreshDetail} />}{tab === 'artifacts' && <Artifacts artifacts={detail.artifacts} />}</div></> : <div className="loader"><RefreshCw className="spin" /> Đang mở xưởng…</div>}
+    {systemPage === 'models' ? <RouterModels /> : !selected ? <HomePage projects={projects} onCreate={() => setModal(true)} onOpen={openProject} /> : detail ? <><Topbar project={detail} tab={tab} setTab={changeTab} busy={actionBusy} onRetry={retryProject} onPause={pauseProject} onResume={resumeProject} onStop={stopProject} onDelete={() => setDeleteModal(true)} onHome={goHome} /><div className="content">{detail.status === 'failed' && <div className="workflow-error"><AlertTriangle size={19} /><div><strong>Quy trình đã dừng ở {detail.progress}%</strong><span>{detail.error || 'Agent gặp lỗi không thể tự phục hồi.'}</span></div><button disabled={actionBusy} onClick={retryProject}><Play size={15} /> Tiếp tục từ bước này</button></div>}{detail.status === 'paused' && <div className="workflow-paused"><Pause size={19} /><div><strong>Dự án đã tạm dừng an toàn</strong><span>Bạn có thể mở tab Giao tiếp để chỉnh sửa hoặc giao agent làm lại, sau đó bấm Tiếp tục.</span></div></div>}{detail.status === 'awaiting_approval' && <div className="workflow-approval"><ShieldCheck size={19} /><div><strong>Đang chờ bạn duyệt nội dung</strong><span>Mở tin nhắn có nhãn “Chờ duyệt” trong tab Giao tiếp.</span></div><button onClick={() => changeTab('messages')}>Mở giao tiếp</button></div>}{tab === 'overview' && <Overview project={detail} />}{tab === 'list' && <TaskList project={detail} />}{tab === 'schedule' && <Schedule tasks={detail.tasks} agents={detail.agents} />}{tab === 'messages' && <Messages project={detail} onChanged={refreshDetail} />}{tab === 'agents' && <AgentManagement project={detail} onChanged={refreshDetail} />}{tab === 'artifacts' && <Artifacts artifacts={detail.artifacts} agents={detail.agents} />}</div></> : <div className="loader"><RefreshCw className="spin" /> Đang mở xưởng…</div>}
   </div>{modal && <NewProjectModal onClose={() => setModal(false)} onCreated={created} />}{deleteModal && detail && <ConfirmDeleteModal project={detail} busy={actionBusy} onClose={() => setDeleteModal(false)} onConfirm={deleteProject} />}</div>
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from ..db import Database
@@ -8,7 +9,7 @@ from ..services.router import NineRouterClient
 
 
 class ConsultantCoordinator:
-    """Runs optional per-project specialists before the core production agents."""
+    """Runs optional writer workers in parallel before the lead writer consolidates."""
 
     SCHEMA = """{
       "recommendations": ["khuyến nghị cụ thể, có thể thực hiện"],
@@ -24,12 +25,11 @@ class ConsultantCoordinator:
         agents = self.db.list_project_agents(
             state["project_id"], custom_only=True, enabled_only=True
         )
+        agents = [agent for agent in agents if agent.get("role_key") == "writer"]
         if not agents:
             return {**state, "custom_agent_outputs": []}
 
-        outputs: list[dict] = []
-        usages = list(state.get("model_usage", []))
-        for agent in agents:
+        async def run_worker(agent: dict) -> tuple[dict | None, dict | None]:
             agent_id = agent["id"]
             self.db.set_task_status(state["project_id"], agent_id, "in_progress")
             self.db.add_event(
@@ -63,33 +63,33 @@ class ConsultantCoordinator:
                 temperature = agent.get("temperature")
                 advice, usage = await self.router.chat_json(
                     system=(
-                        f"Bạn là {agent['name']}, chuyên gia {agent['role']} trong một xưởng truyện tranh. "
+                        f"Bạn là {agent['name']}, Biên kịch hỗ trợ trong một xưởng truyện tranh. "
                         f"Hướng dẫn làm việc riêng của bạn:\n{agent['instructions']}\n"
-                        "Chỉ tư vấn trong đúng chuyên môn, không thay đổi nhiệm vụ của 6 agent lõi."
+                        "Hãy đề xuất chất liệu để Biên kịch chính tổng hợp; không tự khóa bản cuối."
                     ),
                     prompt=(
                         f"Yêu cầu người dùng:\n{state['user_prompt']}\n\n"
                         f"Kế hoạch PM:\n{json.dumps(state.get('plan', {}), ensure_ascii=False)}\n\n"
-                        "Hãy đưa ra khuyến nghị ngắn, cụ thể để các agent lõi áp dụng."
+                        "Hãy đề xuất cấu trúc, cảnh và rủi ro để Biên kịch chính áp dụng."
                     ),
                     schema_hint=self.SCHEMA,
                     temperature=float(temperature) if temperature is not None else 0.35,
                     on_attempt=attempt,
                     models=models,
                 )
-                outputs.append({
+                output = {
                     "agent_id": agent_id,
                     "name": agent["name"],
                     "role": agent["role"],
                     "advice": advice,
-                })
-                usages.append(usage)
+                }
                 self.db.set_task_status(state["project_id"], agent_id, "done")
                 self.db.add_event(
                     state["project_id"], agent_id, "agent_completed",
-                    f"{agent['name']} đã bàn giao tư vấn cho các agent lõi",
+                    f"{agent['name']} đã bàn giao bản hỗ trợ cho Biên kịch chính",
                     advice,
                 )
+                return output, usage
             except Exception as error:  # noqa: BLE001 - optional agents cannot stop production
                 self.db.set_task_status(
                     state["project_id"], agent_id, "done", f"Bỏ qua do lỗi: {error}"
@@ -99,5 +99,9 @@ class ConsultantCoordinator:
                     f"Bỏ qua tư vấn của {agent['name']} để workflow lõi tiếp tục",
                     {"error": str(error)},
                 )
+                return None, None
 
+        results = await asyncio.gather(*(run_worker(agent) for agent in agents))
+        outputs = [output for output, _ in results if output is not None]
+        usages = [*state.get("model_usage", []), *[usage for _, usage in results if usage is not None]]
         return {**state, "custom_agent_outputs": outputs, "model_usage": usages}

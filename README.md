@@ -11,6 +11,7 @@ ComicFlow là xưởng sản xuất truyện tranh tự động sử dụng **La
 - Ảnh từng trang được kiểm ngay sau khi Họa sĩ tạo xong.
 - Tin nhắn chỉ hiển thị sản phẩm thuộc đúng công việc đó.
 - Tự giao lại đúng agent khi Kiểm duyệt phát hiện lỗi nghiêm trọng.
+- Kết quả kiểm duyệt chưa đạt không làm dự án chuyển sang `failed`; PM tự giao vòng sửa.
 - Tạm dừng, can thiệp, duyệt nội dung, tiếp tục hoặc dừng hẳn dự án.
 - Quản lý agent bổ sung và model riêng của từng agent.
 - Quản lý model mặc định của 9Router ở cấp toàn hệ thống.
@@ -62,7 +63,7 @@ Mỗi task hoặc sản phẩm đi qua hai trạng thái chính:
 | **Kiểm duyệt** | Kiểm tra từng đầu ra, an toàn độ tuổi, tính nhất quán và trả lỗi về đúng agent. |
 | **Biên tập & dàn trang** | Đặt tranh và đoạn kể ở hai vùng riêng, hoàn thiện bìa và ghép PDF. |
 
-Biên tập không thực hiện quality gate tổng thể. Việc kiểm duyệt thuộc trách nhiệm của agent **Kiểm duyệt**.
+Biên tập không thực hiện quality gate tổng thể. Việc kiểm duyệt thuộc trách nhiệm của agent **Kiểm duyệt**. Kế hoạch và lịch do PM tạo không đi qua Testing; PM là bộ phận điều phối, không phải đối tượng kiểm duyệt.
 
 ## Yêu cầu môi trường
 
@@ -173,6 +174,8 @@ Khi một đầu ra hoàn thành:
 4. Nếu có lỗi nghiêm trọng, hệ thống tạo ticket và giao lại agent sở hữu đầu ra.
 5. Lỗi nhỏ được ghi chú nhưng vẫn cho đạt.
 
+Kiểm duyệt áp dụng chính sách mặc định là **Đạt**. Chỉ file hỏng/thiếu, nội dung không an toàn theo tuổi, sai nghiêm trọng kịch bản đã khóa hoặc thay đổi ngoại hình nhân vật mới bị trả lại. Khi bị trả lại, workflow vẫn chạy và PM tự giao vòng sửa cho đúng agent. Sau giới hạn vòng sửa, hệ thống lưu cảnh báo và tiếp tục thay vì làm dự án `failed`.
+
 Ví dụ: Họa sĩ tạo xong ảnh trang 4 thì ảnh trang 4 được kiểm ngay, không cần đợi tạo xong toàn bộ truyện.
 
 ## Giao tiếp và sản phẩm theo từng tin nhắn
@@ -208,90 +211,73 @@ Không có chức năng thay ảnh thủ công. Khi ảnh chưa đạt, agent Th
 
 ## Quản lý agent
 
-Mỗi dự án có hai nhóm agent:
+Workflow luôn giữ nguyên 6 lane: PM, Biên kịch, Thiết kế nhân vật, Họa sĩ, Kiểm duyệt và Biên tập. Agent được thêm không tạo một bước workflow mới; nó trở thành worker có **tên riêng** trong lane cùng vai trò.
 
-| Nhóm | Chức năng | Có thể xóa? |
-|---|---|---|
-| **6 agent lõi** | Trực tiếp tạo sản phẩm: PM, Biên kịch, Thiết kế nhân vật, Họa sĩ, Kiểm duyệt, Biên tập & dàn trang. | Không |
-| **Agent bổ sung** | Đóng vai chuyên gia tư vấn cho một dự án cụ thể trước khi sản xuất nội dung. | Có |
+### Năm vai trò có thể chọn
 
-Một dự án có thể có tối đa 10 agent bổ sung. Agent bổ sung **không thay thế agent lõi** và không trực tiếp viết lại kịch bản, tạo ảnh, duyệt sản phẩm hoặc xuất PDF.
+PM là đầu mối điều phối duy nhất nên không thể tạo thêm. Khi thêm agent, người dùng chọn một trong 5 vai trò:
 
-### Agent bổ sung làm gì?
-
-Khi tạo agent, người dùng xác định ba thông tin quan trọng:
-
-- **Tên:** tên hiển thị trong List, lịch và phần giao tiếp.
-- **Vai trò:** lĩnh vực mà agent chịu trách nhiệm tư vấn, ví dụ lịch sử Việt Nam, tâm lý trẻ em hoặc giáo dục khoa học.
-- **Hướng dẫn làm việc:** quy định cụ thể agent phải kiểm tra, điều cần khuyến nghị và điều phải tránh.
-
-Mỗi agent bổ sung đọc:
-
-- Yêu cầu ban đầu của người dùng.
-- Kế hoạch sản xuất do PM tạo.
-- Vai trò và hướng dẫn riêng đã được cấu hình.
-
-Sau đó agent trả về ba nhóm thông tin:
-
-```text
-Khuyến nghị có thể thực hiện
-Rủi ro cần tránh
-Ghi chú bàn giao cho các agent lõi
-```
-
-Kết quả tư vấn được lưu vào trạng thái dự án và được đưa vào ngữ cảnh làm việc của **Biên kịch**, **Thiết kế nhân vật** và **Họa sĩ**. Các agent lõi vẫn chịu trách nhiệm cuối cùng đối với sản phẩm của mình.
-
-### Agent bổ sung hoạt động ở thời điểm nào?
-
-```text
-PM lập kế hoạch
-      │
-      ▼
-Các agent bổ sung lần lượt tư vấn
-      │
-      ▼
-Biên kịch → Thiết kế nhân vật → Họa sĩ → Kiểm duyệt → Dàn trang
-```
-
-- Các agent bổ sung chạy sau PM và trước Biên kịch.
-- Nếu có nhiều agent bổ sung, hệ thống gọi lần lượt từng agent và thu thập tất cả kết quả.
-- Task tư vấn xuất hiện trong List và lịch; kịch bản phụ thuộc vào việc hoàn tất các task tư vấn này.
-- Nếu một agent bổ sung gặp lỗi model, hệ thống ghi lại lỗi, bỏ qua tư vấn đó và tiếp tục workflow lõi. Agent tùy chọn không làm hỏng toàn bộ dự án.
-- Agent được thêm hoặc bật lại chỉ tham gia khi workflow **đi qua giai đoạn tư vấn lần tiếp theo**. Nó không tự sửa những sản phẩm đã hoàn thành trước đó.
-
-### Ví dụ agent bổ sung
-
-| Vai trò | Nhiệm vụ nên giao |
+| Vai trò | Cách agent mới hỗ trợ |
 |---|---|
-| **Cố vấn lịch sử Việt Nam** | Kiểm tra niên đại, trang phục, kiến trúc, cách xưng hô và chi tiết văn hóa. |
-| **Chuyên gia tâm lý trẻ em** | Kiểm tra thông điệp, mức độ đáng sợ, cách giải quyết xung đột theo độ tuổi. |
-| **Cố vấn giáo dục khoa học** | Kiểm tra kiến thức khoa học và đề xuất cách giải thích dễ hiểu. |
-| **Cố vấn văn hóa địa phương** | Kiểm tra phong tục, địa danh, biểu tượng và tránh mô tả sai lệch. |
-| **Chuyên gia hài hước** | Đề xuất tình huống vui phù hợp độ tuổi nhưng không thay đổi cốt truyện trực tiếp. |
+| **Biên kịch** | Tạo đề xuất cấu trúc, cảnh và rủi ro song song; Biên kịch chính tổng hợp bản cuối để giữ mạch truyện. |
+| **Thiết kế nhân vật** | Chia các ảnh tham chiếu nhân vật cho nhiều agent tạo đồng thời, dùng chung style và anchor. |
+| **Họa sĩ** | Chia các trang theo vòng tròn cho nhiều Họa sĩ tạo ảnh đồng thời. |
+| **Kiểm duyệt** | Phân phối từng sản phẩm Testing cho các agent Kiểm duyệt đang bật. |
+| **Biên tập & dàn trang** | Chia các trang cần ghép tranh và đoạn kể; Biên tập chính ghép PDF cuối. |
 
-Ví dụ cấu hình:
+### Quản lý theo tên và vai trò
+
+Mỗi agent có một `id` riêng, tên hiển thị và vai trò chuẩn hóa. List, lịch, tin nhắn, artifact và tiến độ hiển thị theo dạng:
 
 ```text
-Tên: An
-Vai trò: Cố vấn lịch sử Việt Nam
-Hướng dẫn: Kiểm tra trang phục, kiến trúc, cách xưng hô và các chi tiết lịch sử.
-Chỉ nêu lỗi có bằng chứng; ưu tiên đề xuất ngắn để Biên kịch và Họa sĩ áp dụng.
+An · Họa sĩ
+Mai · Kiểm duyệt
+Linh · Biên tập & dàn trang
 ```
 
-### Các thao tác trong tab Agent
+Workflow vẫn chỉ hiển thị một lane Họa sĩ, nhưng khi mở lane sẽ thấy subtask của từng người:
 
-Trong tab **Agent**, có thể:
+```text
+Họa sĩ
+├── Sáng · Họa sĩ mặc định: bìa, trang 1, 3, 5
+└── An · Họa sĩ hỗ trợ: trang 2, 4, 6
+```
 
-- Thêm agent bổ sung với tên, vai trò, hướng dẫn và màu nhận diện.
-- Tạm ngưng agent để agent không tham gia lần tư vấn tiếp theo.
-- Kích hoạt lại agent đã tạm ngưng.
-- Xóa agent bổ sung khỏi dự án. Việc xóa không xóa ngược những tư vấn đã được dùng trong sản phẩm cũ.
-- Chọn model chính từ danh sách 9Router.
-- Chọn nhiều model fallback.
-- Chọn model ảnh cho hai agent lõi Thiết kế nhân vật hoặc Họa sĩ.
-- Điều chỉnh temperature.
+Một lane chỉ hoàn tất khi mọi worker đã hoàn thành phần việc và các sản phẩm liên quan đã vượt qua Testing.
 
-Agent lõi chỉ cho phép thay đổi cấu hình model; không thể đổi vai trò, tắt hoặc xóa. Agent bổ sung có thể quản lý đầy đủ.
+### Chạy song song
+
+- Thiết kế nhân vật, Họa sĩ và Biên tập có thể xử lý nhiều file/trang đồng thời.
+- Số yêu cầu ảnh đồng thời được giới hạn để tránh gây quá tải cho 9Router.
+- Kết quả được ghép lại theo số trang, không phụ thuộc agent nào hoàn thành trước.
+- Tất cả Họa sĩ dùng chung kịch bản, `style_lock`, character anchor và setting anchor.
+- Mỗi ảnh hoàn thành được đưa vào Testing ngay, không chờ toàn bộ worker.
+- Nếu chỉ có agent mặc định, hệ thống hoạt động tuần tự tương thích như trước.
+
+### Thêm một agent
+
+Khi tạo dự án mới, màn hình tạo dự án luôn hiển thị 6 agent mặc định và cho phép chọn model chính riêng cho từng agent mặc định. Người dùng còn có thể thêm trước tối đa 10 agent hỗ trợ và chọn model chính ngay trong biểu mẫu của từng agent; Họa sĩ và Thiết kế nhân vật còn có lựa chọn model ảnh. Các cấu hình được lưu trước khi workflow khởi động để PM có thể đưa tên của từng agent vào task/subtask ngay từ kế hoạch đầu tiên.
+
+Biểu mẫu tạo agent gồm:
+
+- **Tên agent:** danh tính hiển thị trong dự án.
+- **Vai trò:** chọn từ 5 vai trò cố định.
+- **Hướng dẫn và kỹ năng:** ưu tiên, phong cách hoặc ràng buộc riêng.
+- **Màu nhận diện:** dùng trong List và lịch.
+- **Model chính, fallback và temperature:** cấu hình riêng cho worker.
+- **Model ảnh:** xuất hiện khi chọn Thiết kế nhân vật hoặc Họa sĩ.
+
+Sau khi dự án khởi động, chỉ có thể thêm agent khi dự án ở trạng thái **Tạm dừng**. Agent được thêm sau khi dự án đã đi qua lane tương ứng sẽ tham gia khi workflow quay lại lane đó hoặc ở lần sản xuất tiếp theo; nó không tự thay đổi sản phẩm đã hoàn tất.
+
+### Đổi tên, bật, tắt và xóa
+
+- Có thể đổi tên agent hỗ trợ; task/subtask của agent được đồng bộ lại theo tên mới.
+- Tạm ngưng agent để PM không giao thêm việc ở lần chạy tiếp theo.
+- Kích hoạt lại để agent tham gia worker pool của vai trò.
+- Xóa agent sẽ xóa work item chưa thực hiện của agent đó, nhưng không xóa artifact đã tạo trước đó.
+- Chỉ thao tác **thêm agent mới** yêu cầu dự án ở trạng thái **Tạm dừng**.
+- Đổi model, đổi tên, bật/tắt và xóa agent hỗ trợ có thể thực hiện mà không cần tạm dừng dự án.
+- 6 agent mặc định chỉ cho phép thay đổi model; không thể đổi tên, tắt hoặc xóa.
 
 ### Cách agent sử dụng model
 

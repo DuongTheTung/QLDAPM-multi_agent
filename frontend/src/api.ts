@@ -1,4 +1,4 @@
-import type { ApprovalStage, EventContent, Project, ProjectAgent, ProjectDetail } from './types'
+import type { AgentId, ApprovalStage, EventContent, Project, ProjectAgent, ProjectDetail, WorkerRole } from './types'
 
 const ROOT = import.meta.env.VITE_API_URL || ''
 
@@ -12,6 +12,16 @@ export interface ModelCatalog {
 
 export interface RouterCatalog extends ModelCatalog {
   router: string; api_key_configured: boolean; available_models: string[]; catalog_error?: string
+}
+
+export interface CreateAgentInput {
+  name: string; role_key: WorkerRole; instructions: string; color: string
+  model?: string | null; fallback_models?: string[]; image_model?: string | null
+  temperature?: number | null
+}
+
+export interface CoreAgentModelInput {
+  agent_id: AgentId; model?: string | null
 }
 
 async function json<T>(path: string, options?: RequestInit): Promise<T> {
@@ -32,14 +42,14 @@ export const api = {
   }),
   list: () => json<Project[]>('/api/projects'),
   get: (id: string) => json<ProjectDetail>(`/api/projects/${id}`),
-  create: (prompt: string) => json<Project>('/api/projects', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }),
+  create: (prompt: string, agents: CreateAgentInput[] = [], core_agent_models: CoreAgentModelInput[] = []) => json<Project>('/api/projects', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, agents, core_agent_models }),
   }),
   retry: (id: string) => json<{ status: string }>(`/api/projects/${id}/retry`, { method: 'POST' }),
   pause: (id: string) => json<{ status: string }>(`/api/projects/${id}/pause`, { method: 'POST' }),
   resume: (id: string) => json<{ status: string }>(`/api/projects/${id}/resume`, { method: 'POST' }),
   stop: (id: string) => json<{ status: string }>(`/api/projects/${id}/stop`, { method: 'POST' }),
-  createAgent: (id: string, agent: { name: string; role: string; instructions: string; color: string; model?: string | null; fallback_models?: string[]; temperature?: number | null }) => json<ProjectAgent>(`/api/projects/${id}/agents`, {
+  createAgent: (id: string, agent: CreateAgentInput) => json<ProjectAgent>(`/api/projects/${id}/agents`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agent),
   }),
   updateAgent: (id: string, agentId: string, changes: AgentChanges) => json<ProjectAgent>(`/api/projects/${id}/agents/${agentId}`, {

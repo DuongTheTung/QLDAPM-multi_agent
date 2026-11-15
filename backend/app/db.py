@@ -8,15 +8,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .schemas import utcnow
+from .schemas import WORKER_ROLE_LABELS, utcnow
 
 CORE_AGENT_SEEDS = (
-    ("pm", "Tùng", "PM", "Quản lý kế hoạch, lịch, tiến độ và điều phối xử lý lỗi.", "#263f35"),
-    ("writer", "Sơn", "Biên kịch", "Viết cấu trúc truyện, phân trang và đoạn kể phù hợp lứa tuổi.", "#dd5c3d"),
-    ("designer", "Hải", "Thiết kế nhân vật", "Khóa phong cách, nhân vật, bối cảnh và tạo ảnh tham chiếu.", "#d99b2b"),
-    ("artist", "Sáng", "Họa sĩ", "Tạo prompt và minh họa bìa, từng trang theo kịch bản đã khóa.", "#426b91"),
-    ("reviewer", "Minh", "Kiểm duyệt", "Kiểm tra từng đầu ra ngay khi hoàn thành và trả lỗi về đúng agent.", "#3f8178"),
-    ("editor", "Trí", "Biên tập & dàn trang", "Ghép tranh với khối văn bản riêng, hoàn thiện bìa và xuất PDF.", "#7d5c8d"),
+    ("pm", "PM", "PM", "Quản lý kế hoạch, lịch, tiến độ và điều phối xử lý lỗi.", "#263f35"),
+    ("writer", "Biên kịch", "Biên kịch", "Viết cấu trúc truyện, phân trang và đoạn kể phù hợp lứa tuổi.", "#dd5c3d"),
+    ("designer", "Thiết kế nhân vật", "Thiết kế nhân vật", "Khóa phong cách, nhân vật, bối cảnh và tạo ảnh tham chiếu.", "#d99b2b"),
+    ("artist", "Họa sĩ", "Họa sĩ", "Tạo prompt và minh họa bìa, từng trang theo kịch bản đã khóa.", "#426b91"),
+    ("reviewer", "Kiểm duyệt", "Kiểm duyệt", "Kiểm tra từng đầu ra ngay khi hoàn thành và trả lỗi về đúng agent.", "#3f8178"),
+    ("editor", "Biên tập & dàn trang", "Biên tập & dàn trang", "Ghép tranh với khối văn bản riêng, hoàn thiện bìa và xuất PDF.", "#7d5c8d"),
 )
 
 
@@ -169,11 +169,31 @@ class Database:
             self._ensure_column(db, "project_agents", "fallback_models", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(db, "project_agents", "image_model", "TEXT")
             self._ensure_column(db, "project_agents", "temperature", "REAL")
+            self._ensure_column(db, "project_agents", "role_key", "TEXT")
             self._ensure_column(db, "tasks", "parent_id", "TEXT")
             self._ensure_column(db, "tasks", "item_type", "TEXT NOT NULL DEFAULT 'task'")
             self._ensure_column(db, "tasks", "step_key", "TEXT NOT NULL DEFAULT ''")
             for row in db.execute("SELECT id FROM projects"):
                 self._insert_core_agents(db, row["id"])
+            for role_key in WORKER_ROLE_LABELS:
+                db.execute(
+                    "UPDATE project_agents SET role_key=? WHERE is_core=1 AND id LIKE ?",
+                    (role_key, f"%:{role_key}"),
+                )
+            db.execute(
+                "UPDATE project_agents SET role_key=CASE "
+                "WHEN role LIKE '%Họa%' OR role LIKE '%họa%' THEN 'artist' "
+                "WHEN role LIKE '%Thiết kế%' OR role LIKE '%thiết kế%' THEN 'designer' "
+                "WHEN role LIKE '%Biên tập%' OR role LIKE '%biên tập%' "
+                "OR role LIKE '%Dàn trang%' OR role LIKE '%dàn trang%' THEN 'editor' "
+                "WHEN role LIKE '%Biên kịch%' OR role LIKE '%biên kịch%' THEN 'writer' "
+                "ELSE 'reviewer' END WHERE is_core=0 AND role_key IS NULL"
+            )
+            for role_key, label in WORKER_ROLE_LABELS.items():
+                db.execute(
+                    "UPDATE project_agents SET role=? WHERE is_core=0 AND role_key=?",
+                    (label, role_key),
+                )
 
     def get_app_setting(self, key: str, default: Any = None) -> Any:
         with self.connect() as db:
@@ -205,9 +225,12 @@ class Database:
         for agent_id, name, role, instructions, color in CORE_AGENT_SEEDS:
             db.execute(
                 "INSERT OR IGNORE INTO project_agents "
-                "(id,project_id,name,role,instructions,color,is_core,enabled,created_at) "
-                "VALUES(?,?,?,?,?,?,1,1,?)",
-                (f"{project_id}:{agent_id}", project_id, name, role, instructions, color, now),
+                "(id,project_id,name,role,instructions,color,is_core,enabled,created_at,role_key) "
+                "VALUES(?,?,?,?,?,?,1,1,?,?)",
+                (
+                    f"{project_id}:{agent_id}", project_id, name, role, instructions,
+                    color, now, agent_id if agent_id != "pm" else "pm",
+                ),
             )
 
     @staticmethod
@@ -241,6 +264,7 @@ class Database:
         item["enabled"] = bool(item["enabled"])
         item["key"] = item["id"].split(":", 1)[1] if item["is_core"] else item["id"]
         item["fallback_models"] = json.loads(item.get("fallback_models") or "[]")
+        item["role_key"] = item.get("role_key") or item["key"]
         return item
 
     def list_project_agents(
@@ -268,9 +292,9 @@ class Database:
         return self._agent_row(row) if row else None
 
     def create_project_agent(
-        self, project_id: str, name: str, role: str, instructions: str, color: str,
+        self, project_id: str, name: str, role_key: str, instructions: str, color: str,
         model: str | None = None, fallback_models: list[str] | None = None,
-        temperature: float | None = None,
+        temperature: float | None = None, image_model: str | None = None,
     ) -> dict[str, Any]:
         import uuid
 
@@ -279,10 +303,12 @@ class Database:
             db.execute(
                 "INSERT INTO project_agents "
                 "(id,project_id,name,role,instructions,color,is_core,enabled,created_at,"
-                "model,fallback_models,temperature) VALUES(?,?,?,?,?,?,0,1,?,?,?,?)",
+                "model,fallback_models,temperature,image_model,role_key) "
+                "VALUES(?,?,?,?,?,?,0,1,?,?,?,?,?,?)",
                 (
-                    agent_id, project_id, name, role, instructions, color, utcnow(), model,
-                    json.dumps(fallback_models or []), temperature,
+                    agent_id, project_id, name, WORKER_ROLE_LABELS[role_key], instructions,
+                    color, utcnow(), model, json.dumps(fallback_models or []), temperature,
+                    image_model, role_key,
                 ),
             )
         return self.get_project_agent(project_id, agent_id)  # type: ignore[return-value]
@@ -290,7 +316,7 @@ class Database:
     def update_project_agent(self, project_id: str, agent_id: str, **fields: Any) -> bool:
         allowed = {
             "name", "role", "instructions", "color", "enabled", "model",
-            "fallback_models", "image_model", "temperature",
+            "fallback_models", "image_model", "temperature", "role_key",
         }
         nullable_config = {"model", "fallback_models", "image_model", "temperature"}
         selected = {
@@ -311,13 +337,58 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    def role_workers(
+        self, project_id: str, role_key: str, *, include_core: bool = True,
+    ) -> list[dict[str, Any]]:
+        workers = [
+            agent for agent in self.list_project_agents(project_id, enabled_only=True)
+            if agent.get("role_key") == role_key and (include_core or not agent["is_core"])
+        ]
+        for worker in workers:
+            worker["runtime_id"] = role_key if worker["is_core"] else worker["id"]
+        return workers
+
+    def add_helper_task(self, project_id: str, agent: dict[str, Any]) -> None:
+        role_key = str(agent.get("role_key") or "")
+        if role_key not in WORKER_ROLE_LABELS:
+            return
+        with self._lock, self.connect() as db:
+            parent = db.execute(
+                "SELECT * FROM tasks WHERE project_id=? AND agent=? AND item_type='task' "
+                "ORDER BY order_index LIMIT 1", (project_id, role_key),
+            ).fetchone()
+            if not parent:
+                return
+            task_id = f"{parent['id']}-HELP-{str(agent['id'])[-6:]}"
+            db.execute(
+                "INSERT OR IGNORE INTO tasks(id,project_id,title,agent,status,start_at,due_at,"
+                "depends_on,detail,order_index,parent_id,item_type,step_key) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task_id, project_id, f"{agent['name']} hỗ trợ {WORKER_ROLE_LABELS[role_key]}",
+                    agent["id"], "todo", parent["start_at"], parent["due_at"], "[]",
+                    f"Worker {agent['name']} nhận phần việc được PM chia trong lane {WORKER_ROLE_LABELS[role_key]}.",
+                    int(parent["order_index"]) + 1, parent["id"], "subtask",
+                    f"{role_key}_support_{str(agent['id'])[-6:]}",
+                ),
+            )
+
     def delete_project_agent(self, project_id: str, agent_id: str) -> bool:
         with self._lock, self.connect() as db:
+            db.execute(
+                "DELETE FROM tasks WHERE project_id=? AND agent=?", (project_id, agent_id),
+            )
             cursor = db.execute(
                 "DELETE FROM project_agents WHERE project_id=? AND id=? AND is_core=0",
                 (project_id, agent_id),
             )
             return cursor.rowcount > 0
+
+    def remove_agent_tasks(self, project_id: str, agent_id: str) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "DELETE FROM tasks WHERE project_id=? AND agent=?", (project_id, agent_id),
+            )
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -459,14 +530,14 @@ class Database:
 
     def create_quality_test(
         self, project_id: str, owner_agent: str, unit_key: str, title: str,
-        artifact_ids: list[int] | None = None,
+        artifact_ids: list[int] | None = None, reviewer_agent: str = "reviewer",
     ) -> int:
         with self._lock, self.connect() as db:
             cursor = db.execute(
-                "INSERT INTO quality_tests(project_id,owner_agent,unit_key,title,artifact_ids,created_at) "
-                "VALUES(?,?,?,?,?,?)",
+                "INSERT INTO quality_tests(project_id,owner_agent,reviewer_agent,unit_key,title,artifact_ids,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
                 (
-                    project_id, owner_agent, unit_key, title,
+                    project_id, owner_agent, reviewer_agent, unit_key, title,
                     json.dumps(artifact_ids or []), utcnow(),
                 ),
             )

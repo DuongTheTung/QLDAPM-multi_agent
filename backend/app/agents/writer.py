@@ -49,8 +49,7 @@ không viết theo dạng bóng thoại rời rạc hoặc câu cụt lủn. M�
             state, "writer_structure", "Cấu trúc câu chuyện",
             content={"structure": script.get("structure"), "lesson": script.get("lesson")},
         )
-        if structure_test.get("verdict") == "REVISE":
-            raise ValueError(f"Cấu trúc chưa đạt kiểm duyệt: {structure_test.get('summary', '')}")
+        self.revise_if_needed(state, structure_test, "writer_structure")
         pages = script.get("pages", [])
         self.step(state, "writer_pages", "Biên kịch đang kiểm tra phân trang")
         expected = state["plan"]["page_count"]
@@ -65,15 +64,13 @@ không viết theo dạng bóng thoại rời rạc hoặc câu cụt lủn. M�
         pages_test = await self.quality_gate(
             state, "writer_pages", "Kịch bản phân trang", content={"pages": pages},
         )
-        if pages_test.get("verdict") == "REVISE":
-            raise ValueError(f"Phân trang chưa đạt kiểm duyệt: {pages_test.get('summary', '')}")
+        self.revise_if_needed(state, pages_test, "writer_pages")
         self.step(state, "writer_story_text", "Biên kịch đang hoàn thiện đoạn kể cho từng trang")
         self.save_json(state, "02-script.json", script, "script")
         story_test = await self.quality_gate(
             state, "writer_story_text", "Đoạn kể theo từng trang", content={"pages": pages},
         )
-        if story_test.get("verdict") == "REVISE":
-            raise ValueError(f"Đoạn kể chưa đạt kiểm duyệt: {story_test.get('summary', '')}")
+        self.revise_if_needed(state, story_test, "writer_story_text")
         self.db.update_project(state["project_id"], stage="character_design", progress=30)
         self.completed(state, f"Đã hoàn thành kịch bản {expected} trang")
         self.event(state, "handoff", "Kịch bản đã qua Testing; bàn giao Thiết kế nhân vật", {"to": "designer"})
