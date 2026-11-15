@@ -30,6 +30,7 @@ production brief."""
 
     async def run(self, state: ComicState) -> ComicState:
         self.started(state, "script", 18)
+        self.step(state, "writer_structure", "Biên kịch đang dựng cấu trúc câu chuyện")
         feedback = state.get("feedback", "")
         prompt = (
             f"Yêu cầu gốc:\n{state['user_prompt']}\n\nProduction brief:\n{state['plan']}\n"
@@ -39,21 +40,40 @@ production brief."""
         prompt += self.expert_context(state)
         if feedback:
             prompt += f"\n\nĐây là vòng sửa. Chỉ sửa các lỗi biên tập đã chỉ ra, giữ phần tốt:\n{feedback}"
+        models, temperature, _ = self.model_config(state, 0.65)
         script, usage = await self.router.chat_json(
             system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
-            temperature=0.65, on_attempt=self.model_attempt(state),
+            temperature=temperature, on_attempt=self.model_attempt(state), models=models,
         )
+        structure_test = await self.quality_gate(
+            state, "writer_structure", "Cấu trúc câu chuyện",
+            content={"structure": script.get("structure"), "lesson": script.get("lesson")},
+        )
+        if structure_test.get("verdict") == "REVISE":
+            raise ValueError(f"Cấu trúc chưa đạt kiểm duyệt: {structure_test.get('summary', '')}")
         pages = script.get("pages", [])
+        self.step(state, "writer_pages", "Biên kịch đang kiểm tra phân trang")
         expected = state["plan"]["page_count"]
         if len(pages) != expected:
             raise ValueError(f"Biên kịch trả {len(pages)} trang, yêu cầu {expected}")
         for index, page in enumerate(pages, start=1):
             page["page_number"] = index
             page.setdefault("dialogues", [])
+        pages_test = await self.quality_gate(
+            state, "writer_pages", "Kịch bản phân trang", content={"pages": pages},
+        )
+        if pages_test.get("verdict") == "REVISE":
+            raise ValueError(f"Phân trang chưa đạt kiểm duyệt: {pages_test.get('summary', '')}")
+        self.step(state, "writer_dialogue", "Biên kịch đang hoàn thiện và kiểm tra lời thoại")
         self.save_json(state, "02-script.json", script, "script")
+        dialogue_test = await self.quality_gate(
+            state, "writer_dialogue", "Lời thoại hoàn chỉnh", content={"pages": pages},
+        )
+        if dialogue_test.get("verdict") == "REVISE":
+            raise ValueError(f"Lời thoại chưa đạt kiểm duyệt: {dialogue_test.get('summary', '')}")
         self.db.update_project(state["project_id"], stage="character_design", progress=30)
         self.completed(state, f"Đã hoàn thành kịch bản {expected} trang")
-        self.event(state, "handoff", "Biên kịch bàn giao kịch bản cho Thiết kế nhân vật", {"to": "designer"})
+        self.event(state, "handoff", "Kịch bản đã qua Testing; bàn giao Thiết kế nhân vật", {"to": "designer"})
         return {
             **state, "script": script, "stage": "character_design", "feedback": "",
             "model_usage": [*state.get("model_usage", []), usage],

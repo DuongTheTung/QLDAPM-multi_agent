@@ -32,7 +32,9 @@ class WorkflowManager:
         except asyncio.CancelledError:
             pass
         self.running.pop(project_id, None)
-        self.db.update_project(project_id, status="stopped", error=None)
+        self.db.update_project(
+            project_id, status="stopped", pause_requested=False, error=None,
+        )
         self.db.add_event(
             project_id,
             "system",
@@ -41,9 +43,29 @@ class WorkflowManager:
         )
         return True
 
+    def pause(self, project_id: str) -> bool:
+        project = self.db.get_project(project_id)
+        if not project or project["status"] not in {"running", "queued", "pause_requested"}:
+            return False
+        self.db.update_project(
+            project_id, status="pause_requested", pause_requested=True, error=None,
+        )
+        self.db.add_event(
+            project_id, "system", "pause_requested",
+            "Đã yêu cầu tạm dừng; agent sẽ dừng sau bước đang xử lý.",
+        )
+        task = self.running.get(project_id)
+        if not task or task.done():
+            self.db.update_project(
+                project_id, status="paused", pause_requested=False, error=None,
+            )
+        return True
+
     async def _run(self, project_id: str, state: ComicState) -> None:
         try:
-            self.db.update_project(project_id, status="running", error=None)
+            self.db.update_project(
+                project_id, status="running", pause_requested=False, error=None,
+            )
             await self.workflow.run(state)
         except Exception as error:  # noqa: BLE001 - workflow boundary must persist every provider failure
             trace = traceback.format_exc(limit=8)
@@ -56,6 +78,11 @@ class WorkflowManager:
 
     def resume_pending(self) -> None:
         for project in self.db.list_projects():
+            if project["status"] == "pause_requested":
+                self.db.update_project(
+                    project["id"], status="paused", pause_requested=False,
+                )
+                continue
             if project["status"] not in {"queued", "running"}:
                 continue
             raw = project.get("state_json") or "{}"

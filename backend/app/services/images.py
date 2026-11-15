@@ -24,12 +24,13 @@ class ImageService:
         *,
         landscape: bool = False,
         on_warning: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         size = "1536x1024" if landscape else "1024x1536"
         try:
             response = await self.router.client.images.generate(
-                model=self.settings.nine_router_image_model,
+                model=model or self.settings.nine_router_image_model,
                 prompt=prompt,
                 size=size,
                 n=1,

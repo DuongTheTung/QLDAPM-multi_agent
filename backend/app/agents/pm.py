@@ -32,12 +32,15 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
             return self._close(state)
 
         self.started(state, "planning", 5)
+        self.step(state, "pm_scope", "PM đang phân tích yêu cầu và khóa phạm vi")
+        models, temperature, _ = self.model_config(state, 0.25)
         plan, usage = await self.router.chat_json(
             system=self.SYSTEM,
             prompt=f"Lập production brief từ yêu cầu duy nhất này:\n{state['user_prompt']}",
             schema_hint=self.SCHEMA,
-            temperature=0.25,
+            temperature=temperature,
             on_attempt=self.model_attempt(state),
+            models=models,
         )
         plan["page_count"] = max(4, min(24, int(plan.get("page_count", 8))))
         title = str(plan.get("title") or state.get("title") or "Truyện mới")[:120]
@@ -46,8 +49,25 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         )
         tasks = self._schedule(state["project_id"], plan["page_count"], custom_agents)
         self.db.replace_tasks(state["project_id"], tasks)
+        scope_test = await self.quality_gate(
+            state, "pm_scope", "Phạm vi sản xuất", content=plan,
+        )
+        if scope_test.get("verdict") == "REVISE":
+            raise ValueError(f"Phạm vi chưa đạt kiểm duyệt: {scope_test.get('summary', '')}")
+        self.step(state, "pm_schedule", "PM đang kiểm tra dependency và lịch sản xuất")
+        schedule_test = await self.quality_gate(
+            state, "pm_schedule", "Dependency và lịch sản xuất", content={"tasks": tasks},
+        )
+        if schedule_test.get("verdict") == "REVISE":
+            raise ValueError(f"Lịch sản xuất chưa đạt kiểm duyệt: {schedule_test.get('summary', '')}")
+        self.step(state, "pm_handoff", "PM đã đồng bộ lịch, dependency và bàn giao task/subtask")
         self.db.update_project(state["project_id"], title=title, stage="script", progress=10)
         self.save_json(state, "01-production-plan.json", plan, "plan")
+        plan_test = await self.quality_gate(
+            state, "pm_handoff", "Kế hoạch sản xuất và tiêu chí nghiệm thu", content=plan,
+        )
+        if plan_test.get("verdict") == "REVISE":
+            raise ValueError(f"Kế hoạch chưa đạt kiểm duyệt: {plan_test.get('summary', '')}")
         self.completed(state, f"PM đã khóa brief “{title}” và lập {len(tasks)} work item")
         self.event(state, "handoff", "PM bàn giao production brief cho Biên kịch", {"to": "writer"})
         return {
@@ -81,33 +101,114 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         now = datetime.now(UTC)
         custom_agents = custom_agents or []
         consultation_minutes = len(custom_agents) * 8
-        consultation_ids = [f"CONSULT-{index + 1}" for index in range(len(custom_agents))]
-        specs = [
-            ("PM-PLAN", "Lập production brief & lịch", "pm", 0, 15, []),
-        ]
-        specs.extend(
-            (
-                consultation_ids[index], f"Tư vấn: {agent['role']}", agent["id"],
-                15 + index * 8, 23 + index * 8, ["PM-PLAN"],
-            )
-            for index, agent in enumerate(custom_agents)
-        )
-        script_start = 15 + consultation_minutes
-        specs.extend([
-            ("SCRIPT", "Kịch bản phân trang", "writer", script_start, script_start + 30, consultation_ids or ["PM-PLAN"]),
-            ("DESIGN", "Character bible & ảnh tham chiếu", "designer", script_start + 30, script_start + 70, ["SCRIPT"]),
-            ("ART", f"Bìa & {page_count} trang tranh", "artist", script_start + 70, script_start + 70 + page_count * 18, ["DESIGN"]),
-            ("EDITOR", "Quality gate, bóng thoại & PDF", "editor", script_start + 70 + page_count * 18, script_start + 105 + page_count * 18, ["ART"]),
-        ])
-        tasks = []
-        for index, (task_id, title, agent, start, end, deps) in enumerate(specs):
+        tasks: list[dict[str, Any]] = []
+        prefix = project_id[:6]
+
+        def add_group(
+            code: str, title: str, agent: str, start: int, end: int,
+            dependency_codes: list[str], detail: str,
+            subtasks: list[tuple[str, str, str]],
+        ) -> None:
+            parent_id = f"{prefix}-{code}"
+            done = False
             tasks.append({
-                "id": f"{project_id[:6]}-{task_id}", "title": title, "agent": agent,
-                "status": "done" if agent == "pm" else "todo",
+                "id": parent_id, "title": title, "agent": agent,
+                "status": "done" if done else "todo",
                 "start_at": (now + timedelta(minutes=start)).isoformat(),
                 "due_at": (now + timedelta(minutes=end)).isoformat(),
-                "depends_on": [f"{project_id[:6]}-{dep}" for dep in deps],
-                "detail": "", "order_index": index,
+                "depends_on": [f"{prefix}-{item}" for item in dependency_codes],
+                "detail": detail, "order_index": len(tasks), "parent_id": None,
+                "item_type": "task", "step_key": "",
             })
+            duration = max(1, end - start)
+            for index, (suffix, subtask_title, step_key) in enumerate(subtasks):
+                sub_start = start + int(duration * index / len(subtasks))
+                sub_end = start + int(duration * (index + 1) / len(subtasks))
+                subtask_id = f"{parent_id}-{suffix}"
+                previous = f"{parent_id}-{subtasks[index - 1][0]}" if index else None
+                tasks.append({
+                    "id": subtask_id, "title": subtask_title, "agent": agent,
+                    "status": "done" if done else "todo",
+                    "start_at": (now + timedelta(minutes=sub_start)).isoformat(),
+                    "due_at": (now + timedelta(minutes=sub_end)).isoformat(),
+                    "depends_on": [previous] if previous else [
+                        f"{prefix}-{item}" for item in dependency_codes
+                    ],
+                    "detail": f"Đầu ra bắt buộc: {subtask_title.lower()}.",
+                    "order_index": len(tasks), "parent_id": parent_id,
+                    "item_type": "subtask", "step_key": step_key,
+                })
+
+        add_group(
+            "PM", "Quản lý và đồng bộ kế hoạch sản xuất", "pm", 0, 15, [],
+            "PM khóa phạm vi, dependency, lịch và theo dõi trạng thái của toàn bộ task/subtask.",
+            [
+                ("01", "Phân tích yêu cầu và khóa phạm vi", "pm_scope"),
+                ("02", "Lập dependency, lịch và tiêu chí nghiệm thu", "pm_schedule"),
+                ("03", "Bàn giao danh sách việc cho từng agent", "pm_handoff"),
+            ],
+        )
+        consultation_ids: list[str] = []
+        for index, agent in enumerate(custom_agents):
+            code = f"CONSULT-{index + 1}"
+            consultation_ids.append(code)
+            add_group(
+                code, f"Tư vấn chuyên môn: {agent['role']}", agent["id"],
+                15 + index * 8, 23 + index * 8, ["PM"],
+                f"{agent['name']} kiểm tra brief theo chuyên môn {agent['role']}.",
+                [("01", "Phân tích rủi ro và bàn giao khuyến nghị", f"consult_{index + 1}")],
+            )
+        script_start = 15 + consultation_minutes
+        add_group(
+            "SCRIPT", "Viết và khóa kịch bản phân trang", "writer",
+            script_start, script_start + 30, consultation_ids or ["PM"],
+            "Kịch bản phải đủ mở–thắt–cao trào–kết–bài học và đúng số trang.",
+            [
+                ("01", "Dựng cấu trúc câu chuyện và bài học", "writer_structure"),
+                ("02", f"Chia nội dung thành đúng {page_count} trang", "writer_pages"),
+                ("03", "Viết và kiểm tra lời thoại đầy đủ ý", "writer_dialogue"),
+            ],
+        )
+        add_group(
+            "DESIGN", "Khóa thiết kế nhân vật và bối cảnh", "designer",
+            script_start + 30, script_start + 70, ["SCRIPT"],
+            "Không vẽ trang truyện; chỉ tạo bible, anchor cố định và ảnh tham chiếu.",
+            [
+                ("01", "Tạo hồ sơ nhân vật và khóa phong cách", "designer_bible"),
+                ("02", "Khóa anchor nhân vật và bối cảnh", "designer_anchors"),
+                ("03", "Tạo bộ ảnh tham chiếu nhân vật", "designer_references"),
+            ],
+        )
+        art_end = script_start + 70 + page_count * 18
+        add_group(
+            "ART", f"Minh họa bìa và {page_count} trang truyện", "artist",
+            script_start + 70, art_end, ["DESIGN"],
+            "Giữ nguyên kịch bản/ngoại hình và chừa vùng an toàn cho bóng thoại.",
+            [
+                ("01", "Ghép prompt ảnh từ kịch bản và anchor", "artist_prompts"),
+                ("02", "Tạo ảnh bìa không có chữ", "artist_cover"),
+                ("03", f"Tạo đủ {page_count} ảnh trang truyện", "artist_pages"),
+            ],
+        )
+        add_group(
+            "REVIEW", "Kiểm duyệt tổng thể trước dàn trang", "reviewer",
+            art_end, art_end + 25, ["ART"],
+            "Kiểm tra các đầu ra đã qua Testing và trả lỗi nghiêm trọng về đúng agent.",
+            [
+                ("01", "Đối chiếu mạch truyện và an toàn độ tuổi", "reviewer_story"),
+                ("02", "Đối chiếu nhân vật, ảnh và kịch bản", "reviewer_visual"),
+                ("03", "Kết luận đạt hoặc trả đúng agent sửa", "reviewer_final"),
+            ],
+        )
+        add_group(
+            "EDITOR", "Dàn trang và xuất PDF", "editor",
+            art_end + 25, art_end + 55, ["REVIEW"],
+            "Chỉ gắn bóng thoại, hoàn thiện bìa và xuất PDF từ đầu ra đã đạt kiểm duyệt.",
+            [
+                ("01", "Gắn bóng thoại không che nhân vật", "editor_layout"),
+                ("02", "Kiểm tra từng trang sau dàn", "editor_pages"),
+                ("03", "Hoàn thiện bìa và xuất PDF", "editor_pdf"),
+            ],
+        )
         return tasks
 

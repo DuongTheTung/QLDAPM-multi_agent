@@ -51,11 +51,21 @@ class ConsultantCoordinator:
                 )
 
             try:
+                primary = str(agent.get("model") or "").strip()
+                fallback_models = [
+                    str(model).strip() for model in agent.get("fallback_models", [])
+                    if str(model).strip()
+                ]
+                configured = [primary, *fallback_models] if primary or fallback_models else []
+                models = list(dict.fromkeys([
+                    *configured, *self.router.settings.models,
+                ])) if configured else None
+                temperature = agent.get("temperature")
                 advice, usage = await self.router.chat_json(
                     system=(
                         f"Bạn là {agent['name']}, chuyên gia {agent['role']} trong một xưởng truyện tranh. "
                         f"Hướng dẫn làm việc riêng của bạn:\n{agent['instructions']}\n"
-                        "Chỉ tư vấn trong đúng chuyên môn, không thay đổi nhiệm vụ của 5 agent lõi."
+                        "Chỉ tư vấn trong đúng chuyên môn, không thay đổi nhiệm vụ của 6 agent lõi."
                     ),
                     prompt=(
                         f"Yêu cầu người dùng:\n{state['user_prompt']}\n\n"
@@ -63,8 +73,9 @@ class ConsultantCoordinator:
                         "Hãy đưa ra khuyến nghị ngắn, cụ thể để các agent lõi áp dụng."
                     ),
                     schema_hint=self.SCHEMA,
-                    temperature=0.35,
+                    temperature=float(temperature) if temperature is not None else 0.35,
                     on_attempt=attempt,
+                    models=models,
                 )
                 outputs.append({
                     "agent_id": agent_id,

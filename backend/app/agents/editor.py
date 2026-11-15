@@ -37,9 +37,16 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
         self.settings = settings
 
     async def run(self, state: ComicState) -> ComicState:
+        """Only lay out outputs that the ReviewerAgent has already approved."""
+        if state.get("stage") != "layout":
+            raise ValueError("Biên tập chỉ nhận sản phẩm đã đạt kiểm duyệt")
+        return await self._layout(state)
+
+    async def _legacy_review(self, state: ComicState) -> ComicState:
         if state.get("stage") == "layout":
-            return self._layout(state)
+            return await self._layout(state)
         self.started(state, "review", 84)
+        self.step(state, "editor_review", "Biên tập đang duyệt nội dung và độ nhất quán")
         prompt = (
             f"Production brief:\n{state['plan']}\n\nKịch bản:\n{state['script']}\n\n"
             f"Character bible:\n{state['character_bible']}\n\nPage prompts:\n{state['page_prompts']}\n\n"
@@ -53,11 +60,13 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
         self.db.add_artifact(
             state["project_id"], self.agent_id, "review_sheet", "Contact sheet kiểm duyệt", str(contact_sheet)
         )
+        models, temperature, _ = self.model_config(state, 0.1)
         try:
             review, usage = await self.router.chat_json(
                 system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
-                temperature=0.1, on_attempt=self.model_attempt(state), image_paths=[contact_sheet],
+                temperature=temperature, on_attempt=self.model_attempt(state), image_paths=[contact_sheet],
                 timeout_seconds=60,
+                models=models,
             )
         except RouterExhaustedError as error:
             self.event(
@@ -101,7 +110,6 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
         progress_by_target = {"writer": 18, "designer": 36, "artist": 52}
         stage_by_target = {"writer": "script", "designer": "character_design", "artist": "illustration"}
         self.db.update_project(state["project_id"], stage=stage_by_target[target], progress=progress_by_target[target])
-        self.db.set_task_status(state["project_id"], target, "in_progress", instructions)
         self.db.add_revision_task(
             state["project_id"], target, f"Vòng sửa {count}: {target}", instructions, 10 + count,
         )
@@ -115,35 +123,78 @@ nghiêm trọng của writer; vài câu cảm thán ngắn có ngữ cảnh vẫ
             "model_usage": [*state.get("model_usage", []), usage],
         }
 
-    def _layout(self, state: ComicState) -> ComicState:
+    async def _layout(self, state: ComicState) -> ComicState:
         self.started(state, "layout", 92)
+        self.step(state, "editor_layout", "Biên tập đang gắn bóng thoại và dàn trang")
         final_dir = self.project_dir(state) / "final"
         final_cover = self.layout.finalize_cover(
             Path(state["cover_image"]), state["title"], final_dir / "cover.png"
         )
-        self.db.add_artifact(
+        cover_id = self.db.add_artifact(
             state["project_id"], self.agent_id, "cover_final", "Bìa hoàn thiện", str(final_cover)
         )
+        self.event(
+            state, "unit_completed", "Biên tập hoàn thiện bìa; chuyển sang Testing",
+            {"artifact_ids": [cover_id], "unit_key": "editor_cover"},
+        )
+        cover_test = await self.quality_gate(
+            state, "editor_layout", "Bìa đã dàn trang", image_path=final_cover,
+            artifact_ids=[cover_id],
+        )
+        if cover_test.get("verdict") == "REVISE":
+            raise ValueError(f"Bìa hoàn thiện chưa đạt: {cover_test.get('summary', '')}")
         final_pages: list[Path] = []
         script_pages = state["script"].get("pages", [])
+        self.step(state, "editor_pages", "Biên tập đang kiểm tra từng trang sau khi gắn thoại")
         for index, (raw, page) in enumerate(zip(state["page_images"], script_pages), start=1):
             output = final_dir / f"page-{index:02d}.png"
             prompt_info = state.get("page_prompts", [])[index - 1] if index <= len(state.get("page_prompts", [])) else {}
             layout_page = {**page, "dialogue_zone": prompt_info.get("dialogue_zone", "top")}
             self.layout.add_dialogue(Path(raw), layout_page, output)
             final_pages.append(output)
-            self.db.add_artifact(state["project_id"], self.agent_id, "page_final", f"Trang {index} — hoàn thiện", str(output))
+            artifact_id = self.db.add_artifact(
+                state["project_id"], self.agent_id, "page_final",
+                f"Trang {index} — hoàn thiện", str(output),
+            )
+            self.event(
+                state, "unit_completed",
+                f"Biên tập hoàn thành trang {index}; chuyển ngay sang Testing",
+                {"artifact_ids": [artifact_id], "page": index, "unit_key": f"editor_page_{index}"},
+            )
+            result = await self.quality_gate(
+                state, "editor_pages", f"Trang {index} sau dàn thoại",
+                content=layout_page, image_path=output, artifact_ids=[artifact_id],
+            )
+            if result.get("verdict") == "REVISE":
+                raise ValueError(f"Trang {index} sau dàn chưa đạt: {result.get('summary', '')}")
         destination = final_dir / "comic.pdf"
+        self.step(state, "editor_pdf", "Biên tập đang hoàn thiện bìa và xuất PDF")
         metadata = {
             "title": state["title"], "project_id": state["project_id"],
             "lesson": state["script"].get("lesson", ""), "review": state.get("review", {}),
             "model_usage": state.get("model_usage", []),
         }
         self.layout.make_pdf(final_cover, final_pages, destination, metadata)
-        self.db.add_artifact(state["project_id"], self.agent_id, "final_pdf", f"{state['title']}.pdf", str(destination))
+        pdf_id = self.db.add_artifact(
+            state["project_id"], self.agent_id, "final_pdf",
+            f"{state['title']}.pdf", str(destination),
+        )
+        self.event(
+            state, "unit_completed", "Biên tập hoàn thành PDF; chuyển sang Testing",
+            {"artifact_ids": [pdf_id], "unit_key": "editor_pdf"},
+        )
+        pdf_test = await self.quality_gate(
+            state, "editor_pdf", "PDF truyện tranh cuối", content=metadata,
+            artifact_ids=[pdf_id],
+        )
+        if pdf_test.get("verdict") == "REVISE":
+            raise ValueError(f"PDF chưa đạt kiểm duyệt: {pdf_test.get('summary', '')}")
         self.db.set_task_status(state["project_id"], self.agent_id, "done")
         self.db.update_project(state["project_id"], stage="finalized", progress=98, final_pdf=str(destination))
-        self.event(state, "artifact_ready", "PDF truyện tranh đã sẵn sàng", {"path": str(destination)})
+        self.event(
+            state, "artifact_ready", "PDF truyện tranh đã sẵn sàng",
+            {"path": str(destination), "artifact_ids": [pdf_id]},
+        )
         self.completed(state, "Đã gắn bóng thoại, hoàn thiện bìa và ghép PDF")
         return {**state, "final_pdf": str(destination), "stage": "finalized", "completed": True}
 

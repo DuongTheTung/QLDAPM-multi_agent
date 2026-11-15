@@ -17,6 +17,7 @@ class BaseAgent:
         self.db = db
         self.router = router
         self.artifacts_root = artifacts_root
+        self.reviewer: Any | None = None
 
     def project_dir(self, state: ComicState) -> Path:
         path = self.artifacts_root / state["project_id"]
@@ -27,13 +28,38 @@ class BaseAgent:
         self.db.add_event(state["project_id"], self.agent_id, event_type, message, payload)
 
     def started(self, state: ComicState, stage: str, progress: int) -> None:
-        self.db.update_project(state["project_id"], status="running", stage=stage, progress=progress)
-        self.db.set_task_status(state["project_id"], self.agent_id, "in_progress")
+        project = self.db.get_project(state["project_id"])
+        fields: dict[str, Any] = {"stage": stage, "progress": progress}
+        if not project or not project.get("pause_requested"):
+            fields["status"] = "running"
+        self.db.update_project(state["project_id"], **fields)
+        self.db.start_agent_work(state["project_id"], self.agent_id)
         self.event(state, "agent_started", f"{self.display_name} bắt đầu: {stage}")
 
     def completed(self, state: ComicState, message: str) -> None:
-        self.db.set_task_status(state["project_id"], self.agent_id, "done")
+        self.db.complete_agent_work(state["project_id"], self.agent_id)
         self.event(state, "agent_completed", message)
+
+    def step(self, state: ComicState, step_key: str, message: str) -> None:
+        self.db.set_task_step(state["project_id"], self.agent_id, step_key)
+        self.event(state, "subtask_started", message, {"step_key": step_key})
+
+    async def quality_gate(
+        self,
+        state: ComicState,
+        step_key: str,
+        title: str,
+        *,
+        content: Any = None,
+        image_path: Path | None = None,
+        artifact_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        if self.reviewer is None:
+            return {"verdict": "PASS", "summary": "Reviewer chưa được gắn."}
+        return await self.reviewer.inspect_unit(
+            state, owner=self.agent_id, unit_key=step_key, title=title,
+            content=content, image_path=image_path, artifact_ids=artifact_ids,
+        )
 
     def model_attempt(self, state: ComicState):
         def callback(model: str, attempt: int, fallback: bool) -> None:
@@ -44,6 +70,27 @@ class BaseAgent:
                 {"model": model, "attempt": attempt, "fallback": fallback},
             )
         return callback
+
+    def model_config(
+        self, state: ComicState, default_temperature: float,
+    ) -> tuple[list[str] | None, float, str | None]:
+        agent = next(
+            (
+                item for item in self.db.list_project_agents(state["project_id"])
+                if item.get("key") == self.agent_id
+            ),
+            None,
+        )
+        if not agent:
+            return None, default_temperature, None
+        primary = str(agent.get("model") or "").strip()
+        fallbacks = [str(model).strip() for model in agent.get("fallback_models", []) if str(model).strip()]
+        configured = [primary, *fallbacks] if primary or fallbacks else []
+        models = list(dict.fromkeys([*configured, *self.router.settings.models])) if configured else None
+        temperature = agent.get("temperature")
+        return models, float(temperature) if temperature is not None else default_temperature, (
+            str(agent.get("image_model") or "").strip() or None
+        )
 
     def expert_context(self, state: ComicState) -> str:
         outputs = state.get("custom_agent_outputs", [])

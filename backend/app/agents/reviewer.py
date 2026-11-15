@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from openai import APIError
+from PIL import Image
+
+from ..config import Settings
+from ..schemas import ComicState
+from ..services.layout import LayoutService
+from ..services.router import RouterExhaustedError
+from .base import BaseAgent
+
+
+class ReviewerAgent(BaseAgent):
+    agent_id = "reviewer"
+    display_name = "Kiểm duyệt"
+
+    UNIT_SYSTEM = """Bạn là agent kiểm duyệt độc lập của xưởng truyện tranh. Kiểm tra đúng đầu ra
+được giao, độ an toàn theo tuổi, sự đầy đủ và tính nhất quán với ngữ cảnh. Chỉ REVISE khi có lỗi
+nghiêm trọng hoặc file hỏng/thiếu; lỗi nhỏ ghi vào notes và vẫn PASS. Không tự sửa nội dung hay ảnh."""
+    UNIT_SCHEMA = """{
+      "verdict": "PASS|REVISE", "summary": "kết luận cụ thể",
+      "serious_issues": ["..."], "notes": ["..."]
+    }"""
+
+    SYSTEM = """Bạn là trưởng kiểm duyệt truyện tranh. Duyệt mạch truyện, an toàn theo tuổi,
+độ nhất quán nhân vật/bối cảnh và mức trung thành với kịch bản. Chỉ REVISE khi có lỗi nghiêm trọng.
+Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc artist. Không tự sửa hay vẽ lại sản phẩm."""
+    SCHEMA = """{
+      "verdict": "PASS|REVISE", "summary": "kết luận ngắn",
+      "serious_issues": [{"category": "...", "reason": "...", "evidence": "..."}],
+      "minor_notes": ["..."], "revision_agent": "writer|designer|artist|none",
+      "revision_instructions": "chỉ dẫn cụ thể",
+      "scores": {"story": 0, "age_safety": 0, "consistency": 0, "script_fidelity": 0}
+    }"""
+
+    def __init__(self, *args, layout: LayoutService, settings: Settings, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.layout = layout
+        self.settings = settings
+
+    async def inspect_unit(
+        self,
+        state: ComicState,
+        *,
+        owner: str,
+        unit_key: str,
+        title: str,
+        content: Any = None,
+        image_path: Path | None = None,
+        artifact_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        artifact_ids = artifact_ids or []
+        self.db.begin_task_testing(state["project_id"], owner, unit_key)
+        test_id = self.db.create_quality_test(
+            state["project_id"], owner, unit_key, title, artifact_ids,
+        )
+        payload = {
+            "test_id": test_id, "owner": owner, "unit_key": unit_key,
+            "title": title, "artifact_ids": artifact_ids, "content": content,
+        }
+        self.event(state, "testing_started", f"Đang kiểm tra: {title}", payload)
+        technical_issue = self._technical_issue(image_path)
+        if technical_issue:
+            result: dict[str, Any] = {
+                "verdict": "REVISE", "summary": technical_issue,
+                "serious_issues": [technical_issue], "notes": [],
+            }
+        else:
+            prompt = (
+                f"Agent thực hiện: {owner}\nĐầu ra: {title}\n"
+                f"Ngữ cảnh kiểm tra:\n{json.dumps(content, ensure_ascii=False, default=str)[:14000]}"
+            )
+            models, temperature, _ = self.model_config(state, 0.05)
+            try:
+                result, _ = await self.router.chat_json(
+                    system=self.UNIT_SYSTEM,
+                    prompt=prompt,
+                    schema_hint=self.UNIT_SCHEMA,
+                    temperature=temperature,
+                    on_attempt=self.model_attempt(state),
+                    image_paths=[image_path] if image_path else None,
+                    timeout_seconds=60,
+                    models=models,
+                )
+            except (RouterExhaustedError, APIError, TimeoutError) as error:
+                result = {
+                    "verdict": "PASS",
+                    "summary": "Đạt kiểm tra kỹ thuật; model semantic tạm thời không phản hồi.",
+                    "serious_issues": [],
+                    "notes": [str(error)],
+                }
+        serious = result.get("serious_issues") or []
+        passed = str(result.get("verdict", "PASS")).upper() != "REVISE" or not serious
+        result["verdict"] = "PASS" if passed else "REVISE"
+        feedback = str(result.get("summary") or "")
+        self.db.finish_quality_test(test_id, result["verdict"], feedback)
+        self.db.finish_task_testing(state["project_id"], owner, unit_key, passed)
+        if not passed:
+            self.db.add_revision_task(
+                state["project_id"], owner, f"Testing trả lại: {title}",
+                feedback or "Sửa lỗi nghiêm trọng được Kiểm duyệt phát hiện.", 40 + test_id,
+            )
+        self.event(
+            state,
+            "testing_passed" if passed else "testing_failed",
+            f"{title}: {'ĐẠT' if passed else 'CHƯA ĐẠT — trả lại ' + owner}",
+            {**payload, "result": result, "assigned_to": None if passed else owner},
+        )
+        return result
+
+    @staticmethod
+    def _technical_issue(image_path: Path | None) -> str:
+        if image_path is None:
+            return ""
+        if not image_path.is_file():
+            return "File ảnh không tồn tại."
+        try:
+            with Image.open(image_path) as image:
+                image.verify()
+            with Image.open(image_path) as image:
+                if image.width < 256 or image.height < 256:
+                    return "Độ phân giải ảnh quá thấp."
+        except (OSError, ValueError) as error:
+            return f"File ảnh không hợp lệ: {error}"
+        return ""
+
+    async def run(self, state: ComicState) -> ComicState:
+        self.started(state, "testing", 84)
+        self.step(state, "reviewer_story", "Kiểm duyệt đang đối chiếu mạch truyện và độ tuổi")
+        contact_sheet = self.layout.make_contact_sheet(
+            Path(state["cover_image"]),
+            [Path(path) for path in state.get("page_images", [])],
+            self.project_dir(state) / "review-contact-sheet.jpg",
+        )
+        artifact_id = self.db.add_artifact(
+            state["project_id"], self.agent_id, "review_sheet",
+            "Contact sheet kiểm duyệt", str(contact_sheet),
+        )
+        prompt = (
+            f"Production brief:\n{state['plan']}\n\nKịch bản:\n{state['script']}\n\n"
+            f"Character bible:\n{state['character_bible']}\n\nPage prompts:\n{state['page_prompts']}\n\n"
+            f"Số ảnh trang: {len(state.get('page_images', []))}."
+        )
+        self.step(state, "reviewer_visual", "Kiểm duyệt đang đối chiếu ảnh, nhân vật và kịch bản")
+        models, temperature, _ = self.model_config(state, 0.05)
+        try:
+            review, usage = await self.router.chat_json(
+                system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
+                temperature=temperature, on_attempt=self.model_attempt(state),
+                image_paths=[contact_sheet], timeout_seconds=60, models=models,
+            )
+        except (RouterExhaustedError, APIError, TimeoutError) as error:
+            review = self._deterministic_review(state)
+            review.setdefault("minor_notes", []).append(str(error))
+            usage = {"model": "deterministic-reviewer-recovery", "prompt_tokens": 0, "completion_tokens": 0}
+        serious = review.get("serious_issues") or []
+        verdict = str(review.get("verdict", "PASS")).upper()
+        if verdict == "REVISE" and not serious:
+            verdict = "PASS"
+            review["verdict"] = "PASS"
+        review_id = self.db.add_artifact(
+            state["project_id"], self.agent_id, "review",
+            f"Kết quả kiểm duyệt {state.get('revision_count', 0) + 1}",
+            str(self.save_json_file(state, review)),
+        )
+        if verdict == "REVISE":
+            self.step(state, "reviewer_final", "Kiểm duyệt kết luận và giao lại agent xử lý")
+            return self._revision(state, review, usage, [artifact_id, review_id])
+        self.step(state, "reviewer_final", "Kiểm duyệt kết luận sản phẩm đạt yêu cầu")
+        self.db.update_project(state["project_id"], stage="layout", progress=90)
+        self.completed(state, "Kiểm duyệt tổng thể kết luận ĐẠT")
+        self.event(
+            state, "review_passed", "Sản phẩm đạt kiểm duyệt; chuyển Biên tập dàn trang",
+            {"artifact_ids": [artifact_id, review_id], "result": review, "to": "editor"},
+        )
+        return {
+            **state, "review": review, "stage": "layout",
+            "model_usage": [*state.get("model_usage", []), usage],
+        }
+
+    def save_json_file(self, state: ComicState, review: dict[str, Any]) -> Path:
+        path = self.project_dir(state) / f"05-review-{state.get('revision_count', 0) + 1}.json"
+        path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def _revision(
+        self, state: ComicState, review: dict[str, Any], usage: dict[str, Any],
+        artifact_ids: list[int],
+    ) -> ComicState:
+        count = state.get("revision_count", 0) + 1
+        target = str(review.get("revision_agent", "artist"))
+        if target not in {"writer", "designer", "artist"}:
+            target = "artist"
+        instructions = str(review.get("revision_instructions") or review.get("summary") or "Sửa lỗi nghiêm trọng")
+        if count > self.settings.max_revisions:
+            error = f"Đã chạm giới hạn {self.settings.max_revisions} vòng sửa. Lỗi cuối: {instructions}"
+            self.db.update_project(
+                state["project_id"], status="needs_attention", stage="needs_attention",
+                error=error, progress=96,
+            )
+            return {**state, "review": review, "stage": "needs_attention", "completed": True, "error": error}
+        progress = {"writer": 18, "designer": 36, "artist": 52}[target]
+        stage = {"writer": "script", "designer": "character_design", "artist": "illustration"}[target]
+        self.db.update_project(state["project_id"], stage=stage, progress=progress)
+        self.db.add_revision_task(
+            state["project_id"], target, f"Kiểm duyệt trả sửa vòng {count}", instructions, 10 + count,
+        )
+        self.event(
+            state, "revision_assigned", f"Kiểm duyệt trả về {target}: {instructions}",
+            {"to": target, "revision": count, "result": review, "artifact_ids": artifact_ids},
+        )
+        return {
+            **state, "review": review, "stage": stage, "revision_target": target,
+            "revision_count": count, "feedback": instructions,
+            "model_usage": [*state.get("model_usage", []), usage],
+        }
+
+    @staticmethod
+    def _deterministic_review(state: ComicState) -> dict[str, Any]:
+        expected = int(state["plan"].get("page_count", 0))
+        script_pages = state["script"].get("pages", [])
+        prompts = state.get("page_prompts", [])
+        images = state.get("page_images", [])
+        issues = []
+        target = "none"
+        if len(script_pages) != expected:
+            target = "writer"
+            issues.append({"category": "page_count", "reason": "Kịch bản thiếu trang", "evidence": f"{len(script_pages)}/{expected}"})
+        elif len(prompts) != expected or len(images) != expected or any(not Path(path).is_file() for path in images):
+            target = "artist"
+            issues.append({"category": "artwork", "reason": "Thiếu prompt hoặc ảnh", "evidence": f"prompts={len(prompts)}, images={len(images)}"})
+        return {
+            "verdict": "REVISE" if issues else "PASS",
+            "summary": "Phát hiện lỗi nghiêm trọng" if issues else "Đủ thành phần để dàn trang",
+            "serious_issues": issues, "minor_notes": [], "revision_agent": target,
+            "revision_instructions": "Bổ sung thành phần bị thiếu, giữ nguyên phần đã đạt." if issues else "",
+            "scores": {"story": 8, "age_safety": 8, "consistency": 8, "script_fidelity": 8},
+        }

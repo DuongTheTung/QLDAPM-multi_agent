@@ -32,6 +32,7 @@ mọi fixed_anchor liên quan vào trường prompt."""
 
     async def run(self, state: ComicState) -> ComicState:
         self.started(state, "illustration", 52)
+        self.step(state, "artist_prompts", "Họa sĩ đang ghép prompt từ kịch bản và anchor")
         feedback = state.get("feedback", "")
         prompt = (
             f"Kịch bản KHÔNG ĐƯỢC SỬA:\n{state['script']}\n\n"
@@ -40,10 +41,12 @@ mọi fixed_anchor liên quan vào trường prompt."""
         prompt += self.expert_context(state)
         if feedback:
             prompt += f"\n\nSửa prompt/ảnh theo yêu cầu biên tập, không đổi kịch bản:\n{feedback}"
+        models, temperature, image_model = self.model_config(state, 0.35)
         try:
             prompt_pack, usage = await self.router.chat_json(
                 system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
-                temperature=0.35, on_attempt=self.model_attempt(state), timeout_seconds=60,
+                temperature=temperature, on_attempt=self.model_attempt(state), timeout_seconds=60,
+                models=models,
             )
         except RouterExhaustedError as error:
             # Artwork prompts are a deterministic composition task. If the text model is
@@ -61,27 +64,71 @@ mọi fixed_anchor liên quan vào trường prompt."""
             raise ValueError(f"Họa sĩ tạo {len(page_prompts)} page prompt, yêu cầu {expected}")
         self._enforce_anchors(prompt_pack, state["character_bible"])
         self.save_json(state, "04-image-prompts.json", prompt_pack, "image_prompts")
+        prompt_test = await self.quality_gate(
+            state, "artist_prompts", "Bộ prompt minh họa", content=prompt_pack,
+        )
+        if prompt_test.get("verdict") == "REVISE":
+            raise ValueError(f"Bộ prompt chưa đạt kiểm duyệt: {prompt_test.get('summary', '')}")
         art_dir = self.project_dir(state) / "raw-art"
 
         def warning(message: str) -> None:
             self.event(state, "warning", message)
 
-        cover = await self.images.generate(prompt_pack["cover"]["prompt"], art_dir / "cover.png", on_warning=warning)
-        self.db.add_artifact(state["project_id"], self.agent_id, "cover_raw", "Bìa thô", str(cover))
+        self.step(state, "artist_cover", "Họa sĩ đang tạo ảnh bìa")
+        cover = await self.images.generate(
+            prompt_pack["cover"]["prompt"], art_dir / "cover.png",
+            on_warning=warning, model=image_model,
+        )
+        cover_id = self.db.add_artifact(
+            state["project_id"], self.agent_id, "cover_raw", "Bìa thô", str(cover),
+        )
+        self.event(
+            state, "unit_completed", "Họa sĩ hoàn thành ảnh bìa; chuyển sang Testing",
+            {"unit_key": "artist_cover", "artifact_ids": [cover_id], "content": prompt_pack["cover"]},
+        )
+        cover_test = await self.quality_gate(
+            state, "artist_cover", "Ảnh bìa", content=prompt_pack["cover"],
+            image_path=cover, artifact_ids=[cover_id],
+        )
+        if cover_test.get("verdict") == "REVISE":
+            raise ValueError(f"Ảnh bìa chưa đạt kiểm duyệt: {cover_test.get('summary', '')}")
         images: list[str] = []
+        self.step(state, "artist_pages", "Họa sĩ đang tạo các trang truyện")
         for index, item in enumerate(page_prompts, start=1):
             self.event(state, "page_rendering", f"Đang dựng trang {index}/{expected}", {"page": index})
-            path = await self.images.generate(item["prompt"], art_dir / f"page-{index:02d}.png", on_warning=warning)
+            path = await self.images.generate(
+                item["prompt"], art_dir / f"page-{index:02d}.png",
+                on_warning=warning, model=image_model,
+            )
             images.append(str(path))
-            self.db.add_artifact(state["project_id"], self.agent_id, "page_raw", f"Trang {index} — tranh thô", str(path))
+            artifact_id = self.db.add_artifact(
+                state["project_id"], self.agent_id, "page_raw",
+                f"Trang {index} — tranh thô", str(path),
+            )
+            self.event(
+                state, "unit_completed",
+                f"Họa sĩ hoàn thành ảnh trang {index}; chuyển ngay sang Testing",
+                {
+                    "unit_key": f"artist_page_{index}", "page": index,
+                    "artifact_ids": [artifact_id], "content": item,
+                },
+            )
+            page_test = await self.quality_gate(
+                state, "artist_pages", f"Ảnh trang {index}", content=item,
+                image_path=path, artifact_ids=[artifact_id],
+            )
+            if page_test.get("verdict") == "REVISE":
+                raise ValueError(
+                    f"Ảnh trang {index} chưa đạt kiểm duyệt: {page_test.get('summary', '')}"
+                )
             progress = 52 + int(28 * index / expected)
             self.db.update_project(state["project_id"], progress=progress)
-        self.db.update_project(state["project_id"], stage="review", progress=82)
+        self.db.update_project(state["project_id"], stage="testing", progress=82)
         self.completed(state, f"Đã dựng bìa và {expected} trang tranh")
-        self.event(state, "handoff", "Họa sĩ bàn giao ảnh thô cho Biên tập", {"to": "editor"})
+        self.event(state, "handoff", "Họa sĩ bàn giao ảnh đã kiểm từng trang cho Kiểm duyệt", {"to": "reviewer"})
         return {
             **state, "page_prompts": page_prompts, "page_images": images,
-            "cover_image": str(cover), "stage": "review", "feedback": "",
+            "cover_image": str(cover), "stage": "testing", "feedback": "",
             "model_usage": [*state.get("model_usage", []), usage],
         }
 

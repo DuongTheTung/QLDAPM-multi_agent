@@ -52,12 +52,14 @@ class NineRouterClient:
         on_attempt: Any | None = None,
         image_paths: list[Path] | None = None,
         timeout_seconds: float | None = None,
+        models: list[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not self.settings.nine_router_api_key:
             raise RouterExhaustedError("NINE_ROUTER_API_KEY chưa được cấu hình")
 
         errors: list[str] = []
-        for model_index, model in enumerate(self.settings.models):
+        model_chain = [model for model in (models or self.settings.models) if model]
+        for model_index, model in enumerate(model_chain):
             for attempt in range(1, 3):
                 try:
                     if on_attempt:

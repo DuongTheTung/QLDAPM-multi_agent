@@ -5,7 +5,7 @@ from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
-AgentId = Literal["pm", "writer", "designer", "artist", "editor"]
+AgentId = Literal["pm", "writer", "designer", "artist", "reviewer", "editor"]
 
 
 class CreateProjectRequest(BaseModel):
@@ -18,6 +18,9 @@ class CreateAgentRequest(BaseModel):
     role: str = Field(min_length=2, max_length=100)
     instructions: str = Field(min_length=10, max_length=4000)
     color: str = Field(default="#557a68", pattern=r"^#[0-9a-fA-F]{6}$")
+    model: str | None = Field(default=None, max_length=160)
+    fallback_models: list[str] = Field(default_factory=list, max_length=8)
+    temperature: float | None = Field(default=None, ge=0, le=2)
 
 
 class UpdateAgentRequest(BaseModel):
@@ -26,6 +29,36 @@ class UpdateAgentRequest(BaseModel):
     instructions: str | None = Field(default=None, min_length=10, max_length=4000)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     enabled: bool | None = None
+    model: str | None = Field(default=None, max_length=160)
+    fallback_models: list[str] | None = Field(default=None, max_length=8)
+    image_model: str | None = Field(default=None, max_length=160)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class ProjectSettingsRequest(BaseModel):
+    approval_enabled: bool
+    approval_stages: list[Literal["script", "character_design", "illustration", "final"]] = []
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: Literal["approve", "revise"]
+    feedback: str = Field(default="", max_length=4000)
+    target_agent: Literal["writer", "designer", "artist", "reviewer", "editor"] | None = None
+
+
+class InterventionRequest(BaseModel):
+    event_id: int | None = None
+    target_agent: Literal["writer", "designer", "artist", "reviewer", "editor"]
+    feedback: str = Field(min_length=3, max_length=4000)
+
+
+class UpdateContentRequest(BaseModel):
+    content: Any
+
+
+class RouterSettingsRequest(BaseModel):
+    models: list[str] = Field(min_length=1, max_length=20)
+    image_model: str = Field(min_length=2, max_length=160)
 
 
 class ProjectSummary(BaseModel):
@@ -52,6 +85,9 @@ class WorkflowTask(BaseModel):
     depends_on: list[str] = []
     detail: str = ""
     order_index: int = 0
+    parent_id: str | None = None
+    item_type: Literal["task", "subtask"] = "task"
+    step_key: str = ""
 
 
 class EventRecord(BaseModel):
@@ -95,6 +131,7 @@ class ComicState(TypedDict, total=False):
     error: str
     model_usage: list[dict[str, Any]]
     custom_agent_outputs: list[dict[str, Any]]
+    approved_signatures: list[str]
 
 
 def utcnow() -> str:
