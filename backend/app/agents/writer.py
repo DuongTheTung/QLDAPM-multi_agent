@@ -45,11 +45,13 @@ không viết theo dạng bóng thoại rời rạc hoặc câu cụt lủn. M�
             system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
             temperature=temperature, on_attempt=self.model_attempt(state), models=models,
         )
+        self.progress(state, 55)
         structure_test = await self.quality_gate(
             state, "writer_structure", "Cấu trúc câu chuyện",
             content={"structure": script.get("structure"), "lesson": script.get("lesson")},
         )
         self.revise_if_needed(state, structure_test, "writer_structure")
+        self.progress(state, 68)
         pages = script.get("pages", [])
         self.step(state, "writer_pages", "Biên kịch đang kiểm tra phân trang")
         expected = state["plan"]["page_count"]
@@ -65,15 +67,27 @@ không viết theo dạng bóng thoại rời rạc hoặc câu cụt lủn. M�
             state, "writer_pages", "Kịch bản phân trang", content={"pages": pages},
         )
         self.revise_if_needed(state, pages_test, "writer_pages")
+        self.progress(state, 84)
         self.step(state, "writer_story_text", "Biên kịch đang hoàn thiện đoạn kể cho từng trang")
         self.save_json(state, "02-script.json", script, "script")
         story_test = await self.quality_gate(
             state, "writer_story_text", "Đoạn kể theo từng trang", content={"pages": pages},
         )
         self.revise_if_needed(state, story_test, "writer_story_text")
+        self.progress(state, 96)
         self.db.update_project(state["project_id"], stage="character_design", progress=30)
         self.completed(state, f"Đã hoàn thành kịch bản {expected} trang")
-        self.event(state, "handoff", "Kịch bản đã qua Testing; bàn giao Thiết kế nhân vật", {"to": "designer"})
+        if self.direct_approval_stage(state):
+            self.event(
+                state, "waiting_for_user_approval",
+                "Kịch bản đã hoàn thành và được chuyển thẳng đến bạn duyệt.",
+                {"to": "user", "approval_stage": "script"},
+            )
+        else:
+            self.event(
+                state, "handoff", "Kịch bản đã được kiểm tra; bàn giao Thiết kế nhân vật",
+                {"to": "designer"},
+            )
         return {
             **state, "script": script, "stage": "character_design", "feedback": "",
             "model_usage": [*state.get("model_usage", []), usage],

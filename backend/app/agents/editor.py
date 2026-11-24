@@ -131,11 +131,12 @@ coi là lỗi nghiêm trọng của writer."""
         final_cover = self.layout.finalize_cover(
             Path(state["cover_image"]), state["title"], final_dir / "cover.png"
         )
+        self.progress(state, 16)
         cover_id = self.db.add_artifact(
             state["project_id"], self.agent_id, "cover_final", "Bìa hoàn thiện", str(final_cover)
         )
         self.event(
-            state, "unit_completed", "Biên tập hoàn thiện bìa; chuyển sang Testing",
+            state, "unit_completed", "Biên tập hoàn thiện bìa",
             {"artifact_ids": [cover_id], "unit_key": "editor_cover"},
         )
         cover_test = await self.quality_gate(
@@ -143,8 +144,16 @@ coi là lỗi nghiêm trọng của writer."""
             artifact_ids=[cover_id],
         )
         self.revise_if_needed(state, cover_test, "editor_layout")
+        self.progress(state, 25)
         script_pages = state["script"].get("pages", [])
         workers = self.role_workers(state)
+        for worker in workers[1:]:
+            self.progress(state, 3, owner=str(worker["runtime_id"]), reset=True)
+        worker_totals = {str(worker["runtime_id"]): 0 for worker in workers}
+        worker_done = {str(worker["runtime_id"]): 0 for worker in workers}
+        for index, _page in enumerate(script_pages, start=1):
+            worker_id = str(workers[(index - 1) % len(workers)]["runtime_id"])
+            worker_totals[worker_id] += 1
         self.step(
             state, "editor_pages",
             f"Đang chia dàn trang cho {len(workers)} agent Biên tập",
@@ -159,19 +168,29 @@ coi là lỗi nghiêm trọng của writer."""
             worker_id = str(worker["runtime_id"])
             step_key = self.worker_step_key(worker, "editor_pages")
             self.db.set_task_status(state["project_id"], worker_id, "in_progress")
+            base = 25 if worker.get("is_core") else 5
+            total = max(1, worker_totals[worker_id])
+            self.progress(
+                state, round(base + (90 - base) * (worker_done[worker_id] + 0.15) / total),
+                owner=worker_id,
+            )
             output = final_dir / f"page-{index:02d}.png"
             layout_page = {**page}
             async with worker_locks[worker_id]:
                 await asyncio.to_thread(
                     self.layout.compose_story_page, Path(raw), layout_page, output,
                 )
+            self.progress(
+                state, round(base + (90 - base) * (worker_done[worker_id] + 0.7) / total),
+                owner=worker_id,
+            )
             artifact_id = self.db.add_artifact(
                 state["project_id"], worker_id, "page_final",
                 f"Trang {index} — hoàn thiện", str(output),
             )
             self.worker_event(
                 state, worker, "unit_completed",
-                f"{worker['name']} hoàn thành dàn trang {index}; chuyển ngay sang Testing",
+                f"{worker['name']} hoàn thành dàn trang {index}",
                 {"artifact_ids": [artifact_id], "page": index, "unit_key": step_key},
             )
             result = await self.quality_gate(
@@ -179,6 +198,11 @@ coi là lỗi nghiêm trọng của writer."""
                 content=layout_page, image_path=output, artifact_ids=[artifact_id], owner=worker_id,
             )
             self.revise_if_needed(state, result, step_key)
+            worker_done[worker_id] += 1
+            self.progress(
+                state, round(base + (90 - base) * worker_done[worker_id] / total),
+                owner=worker_id,
+            )
             return index, output
 
         results = await asyncio.gather(*(
@@ -188,6 +212,7 @@ coi là lỗi nghiêm trọng của writer."""
             )
         ))
         final_pages = [path for _, path in sorted(results)]
+        self.progress(state, 92)
         for worker in workers[1:]:
             self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
             self.worker_event(
@@ -196,6 +221,7 @@ coi là lỗi nghiêm trọng của writer."""
             )
         destination = final_dir / "comic.pdf"
         self.step(state, "editor_pdf", "Biên tập đang hoàn thiện bìa và xuất PDF")
+        self.progress(state, 94)
         metadata = {
             "title": state["title"], "project_id": state["project_id"],
             "lesson": state["script"].get("lesson", ""), "review": state.get("review", {}),
@@ -203,12 +229,13 @@ coi là lỗi nghiêm trọng của writer."""
             "model_usage": state.get("model_usage", []),
         }
         self.layout.make_pdf(final_cover, final_pages, destination, metadata)
+        self.progress(state, 97)
         pdf_id = self.db.add_artifact(
             state["project_id"], self.agent_id, "final_pdf",
             f"{state['title']}.pdf", str(destination),
         )
         self.event(
-            state, "unit_completed", "Biên tập hoàn thành PDF; chuyển sang Testing",
+            state, "unit_completed", "Biên tập hoàn thành PDF",
             {"artifact_ids": [pdf_id], "unit_key": "editor_pdf"},
         )
         pdf_test = await self.quality_gate(
@@ -216,6 +243,7 @@ coi là lỗi nghiêm trọng của writer."""
             artifact_ids=[pdf_id],
         )
         self.revise_if_needed(state, pdf_test, "editor_pdf")
+        self.progress(state, 99)
         self.db.set_task_status(state["project_id"], self.agent_id, "done")
         self.db.update_project(state["project_id"], stage="finalized", progress=98, final_pdf=str(destination))
         self.event(
@@ -223,6 +251,12 @@ coi là lỗi nghiêm trọng của writer."""
             {"path": str(destination), "artifact_ids": [pdf_id]},
         )
         self.completed(state, "Đã ghép tranh với đoạn kể riêng, hoàn thiện bìa và xuất PDF")
+        if self.direct_approval_stage(state):
+            self.event(
+                state, "waiting_for_user_approval",
+                "Bản PDF cuối đã hoàn thành và được chuyển thẳng đến bạn duyệt.",
+                {"to": "user", "approval_stage": "final"},
+            )
         return {**state, "final_pdf": str(destination), "stage": "finalized", "completed": True}
 
     @staticmethod

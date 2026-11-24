@@ -60,6 +60,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         reviewers = self.role_workers(state)
         reviewer = reviewers[sum(unit_key.encode("utf-8")) % len(reviewers)]
         reviewer_id = str(reviewer["runtime_id"])
+        self.progress(state, 8, owner=reviewer_id, reset=True)
         if not reviewer.get("is_core"):
             self.db.set_task_status(state["project_id"], reviewer_id, "in_progress")
         self.db.begin_task_testing(state["project_id"], owner, unit_key)
@@ -104,6 +105,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
                     "serious_issues": [],
                     "notes": [str(error)],
                 }
+        self.progress(state, 78, owner=reviewer_id)
         serious = result.get("serious_issues") or []
         passed = str(result.get("verdict", "PASS")).upper() != "REVISE" or not serious
         result["verdict"] = "PASS" if passed else "REVISE"
@@ -112,7 +114,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         self.db.finish_task_testing(state["project_id"], owner, unit_key, passed)
         if not passed:
             self.db.add_revision_task(
-                state["project_id"], owner, f"Testing trả lại: {title}",
+                state["project_id"], owner, f"Kiểm duyệt trả lại: {title}",
                 feedback or "Sửa lỗi nghiêm trọng được Kiểm duyệt phát hiện.", 40 + test_id,
             )
         self.worker_event(
@@ -121,6 +123,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             f"{title}: {'ĐẠT' if passed else 'CHƯA ĐẠT — trả lại ' + owner}",
             {**payload, "result": result, "assigned_to": None if passed else owner},
         )
+        self.progress(state, 100, owner=reviewer_id)
         return result
 
     @staticmethod
@@ -140,6 +143,29 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
         return ""
 
     async def run(self, state: ComicState) -> ComicState:
+        approved_stages = self.human_approved_stages(state) | set(
+            state.get("human_approved_stages", [])
+        )
+        if "illustration" in approved_stages:
+            review = {
+                "verdict": "PASS",
+                "summary": "Tranh minh họa đã được người dùng duyệt; không kiểm duyệt tự động lại.",
+                "serious_issues": [],
+                "minor_notes": ["Chuyển thẳng sang dàn trang theo quyết định của người dùng."],
+                "revision_agent": "none",
+                "revision_instructions": "",
+                "human_approved": True,
+            }
+            for worker in self.role_workers(state):
+                self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
+            self.db.update_project(state["project_id"], stage="layout", progress=90)
+            self.db.add_event(
+                state["project_id"], "system", "automatic_review_skipped",
+                "Tranh minh họa đã được bạn duyệt; bỏ qua Kiểm duyệt tự động và chuyển sang dàn trang.",
+                {"approval_stage": "illustration", "to": "editor"},
+            )
+            return {**state, "review": review, "stage": "layout"}
+
         self.started(state, "testing", 84)
         self.step(state, "reviewer_story", "Kiểm duyệt đang đối chiếu mạch truyện và độ tuổi")
         contact_sheet = self.layout.make_contact_sheet(
@@ -147,6 +173,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             [Path(path) for path in state.get("page_images", [])],
             self.project_dir(state) / "review-contact-sheet.jpg",
         )
+        self.progress(state, 18)
         artifact_id = self.db.add_artifact(
             state["project_id"], self.agent_id, "review_sheet",
             "Contact sheet kiểm duyệt", str(contact_sheet),
@@ -156,6 +183,17 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             f"Character bible:\n{state['character_bible']}\n\nPage prompts:\n{state['page_prompts']}\n\n"
             f"Số ảnh trang: {len(state.get('page_images', []))}."
         )
+        if approved_stages:
+            protected = {
+                "script": "Biên kịch", "character_design": "Thiết kế nhân vật",
+                "illustration": "Họa sĩ",
+            }
+            locked = [protected[stage] for stage in approved_stages if stage in protected]
+            prompt += (
+                "\n\nQUYẾT ĐỊNH CỦA NGƯỜI DÙNG: Các phần sau đã được duyệt và là dữ liệu khóa: "
+                + ", ".join(locked)
+                + ". Không kiểm tra lại, không yêu cầu các agent này sửa và không dùng chúng làm revision_agent."
+            )
         self.step(state, "reviewer_visual", "Kiểm duyệt đang đối chiếu ảnh, nhân vật và kịch bản")
         models, temperature, _ = self.model_config(state, 0.05)
         try:
@@ -168,6 +206,8 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             review = self._deterministic_review(state)
             review.setdefault("minor_notes", []).append(str(error))
             usage = {"model": "deterministic-reviewer-recovery", "prompt_tokens": 0, "completion_tokens": 0}
+        self.progress(state, 72)
+        review = self._protect_human_approvals(review, approved_stages)
         serious = review.get("serious_issues") or []
         verdict = str(review.get("verdict", "PASS")).upper()
         if verdict == "REVISE" and not serious:
@@ -178,9 +218,11 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             f"Kết quả kiểm duyệt {state.get('revision_count', 0) + 1}",
             str(self.save_json_file(state, review)),
         )
+        self.progress(state, 88)
         if verdict == "REVISE":
             self.step(state, "reviewer_final", "Kiểm duyệt kết luận và giao lại agent xử lý")
             result = self._revision(state, review, usage, [artifact_id, review_id])
+            self.progress(state, 100)
             self._complete_helpers(state)
             return result
         self.step(state, "reviewer_final", "Kiểm duyệt kết luận sản phẩm đạt yêu cầu")
@@ -201,7 +243,7 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
             self.worker_event(
                 state, worker, "agent_completed",
-                f"{worker['name']} đã hoàn thành phần Testing được PM phân công",
+                f"{worker['name']} đã hoàn thành phần kiểm duyệt được PM phân công",
             )
 
     def save_json_file(self, state: ComicState, review: dict[str, Any]) -> Path:
@@ -251,6 +293,30 @@ Nếu cần sửa, chỉ định đúng một agent writer, designer hoặc arti
             "revision_count": count, "feedback": instructions,
             "model_usage": [*state.get("model_usage", []), usage],
         }
+
+    @staticmethod
+    def _protect_human_approvals(
+        review: dict[str, Any], approved_stages: set[str],
+    ) -> dict[str, Any]:
+        target_stage = {
+            "writer": "script", "designer": "character_design", "artist": "illustration",
+        }.get(str(review.get("revision_agent", "none")))
+        if str(review.get("verdict", "PASS")).upper() != "REVISE" or target_stage not in approved_stages:
+            return review
+        protected_review = dict(review)
+        protected_review["verdict"] = "PASS"
+        protected_review["revision_agent"] = "none"
+        protected_review["revision_instructions"] = ""
+        protected_review["serious_issues"] = []
+        notes = list(protected_review.get("minor_notes") or [])
+        notes.append(
+            "Không giao sửa vì phần bị đề xuất đã được người dùng duyệt và khóa."
+        )
+        protected_review["minor_notes"] = notes
+        protected_review["summary"] = (
+            "Tôn trọng quyết định duyệt của người dùng; không kiểm duyệt lại phần đã khóa."
+        )
+        return protected_review
 
     @staticmethod
     def _deterministic_review(state: ComicState) -> dict[str, Any]:

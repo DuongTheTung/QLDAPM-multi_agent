@@ -150,6 +150,7 @@ class ComicState(TypedDict, total=False):
     model_usage: list[dict[str, Any]]
     custom_agent_outputs: list[dict[str, Any]]
     approved_signatures: list[str]
+    human_approved_stages: list[str]
     automatic_revision_counts: dict[str, int]
     review_bypass: list[str]
 

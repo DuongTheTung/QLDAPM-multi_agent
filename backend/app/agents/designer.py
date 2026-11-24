@@ -46,6 +46,7 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
             system=self.SYSTEM, prompt=prompt, schema_hint=self.SCHEMA,
             temperature=temperature, on_attempt=self.model_attempt(state), models=models,
         )
+        self.progress(state, 26)
         self.step(state, "designer_anchors", "Thiết kế đang kiểm tra anchor nhân vật và bối cảnh")
         self.save_json(state, "03-character-bible.json", bible, "character_bible")
         bible_test = await self.quality_gate(
@@ -56,8 +57,17 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
             state, "designer_anchors", "Anchor nhân vật và bối cảnh", content=bible,
         )
         self.revise_if_needed(state, anchor_test, "designer_anchors")
+        self.progress(state, 38)
         refs_dir = self.project_dir(state) / "references"
         workers = self.role_workers(state)
+        for worker in workers[1:]:
+            self.progress(state, 3, owner=str(worker["runtime_id"]), reset=True)
+        characters = bible.get("characters", [])
+        worker_totals = {str(worker["runtime_id"]): 0 for worker in workers}
+        worker_done = {str(worker["runtime_id"]): 0 for worker in workers}
+        for index, _character in enumerate(characters, start=1):
+            worker_id = str(workers[(index - 1) % len(workers)]["runtime_id"])
+            worker_totals[worker_id] += 1
         self.step(
             state, "designer_references",
             f"Đang chia ảnh tham chiếu cho {len(workers)} agent Thiết kế",
@@ -71,6 +81,12 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
             worker_id = str(worker["runtime_id"])
             step_key = self.worker_step_key(worker, "designer_references")
             self.db.set_task_status(state["project_id"], worker_id, "in_progress")
+            base = 38 if worker.get("is_core") else 5
+            total = max(1, worker_totals[worker_id])
+            self.progress(
+                state, round(base + (92 - base) * (worker_done[worker_id] + 0.15) / total),
+                owner=worker_id,
+            )
             safe_name = f"character-{index:02d}.png"
             image_prompt = (
                 f"{bible.get('style_lock', '')}\n{character.get('fixed_anchor', '')}\n"
@@ -86,13 +102,17 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
                     ),
                     model=image_model,
                 )
+            self.progress(
+                state, round(base + (92 - base) * (worker_done[worker_id] + 0.7) / total),
+                owner=worker_id,
+            )
             artifact_id = self.db.add_artifact(
                 state["project_id"], worker_id, "reference_image",
                 character.get("name", safe_name), str(path),
             )
             self.worker_event(
                 state, worker, "unit_completed",
-                f"{worker['name']} hoàn thành ảnh tham chiếu {character.get('name', index)}; chuyển sang Testing",
+                f"{worker['name']} hoàn thành ảnh tham chiếu {character.get('name', index)}",
                 {"artifact_ids": [artifact_id], "content": character, "unit_key": step_key},
             )
             result = await self.quality_gate(
@@ -101,11 +121,16 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
                 image_path=path, artifact_ids=[artifact_id], owner=worker_id,
             )
             self.revise_if_needed(state, result, step_key)
-        characters = bible.get("characters", [])
+            worker_done[worker_id] += 1
+            self.progress(
+                state, round(base + (92 - base) * worker_done[worker_id] / total),
+                owner=worker_id,
+            )
         await asyncio.gather(*(
             render_reference(index, character, workers[(index - 1) % len(workers)])
             for index, character in enumerate(characters, start=1)
         ))
+        self.progress(state, 97)
         for worker in workers[1:]:
             self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
             self.worker_event(
@@ -113,8 +138,22 @@ kịch bản, không thêm nhân vật quan trọng. Mô tả ngoại hình ph�
                 f"{worker['name']} đã hoàn thành phần thiết kế được PM phân công",
             )
         self.db.update_project(state["project_id"], stage="illustration", progress=48)
-        self.completed(state, f"Đã khóa style và {len(bible.get('characters', []))} character anchor")
-        self.event(state, "handoff", "Thiết kế đã qua Testing; bàn giao bible và ảnh tham chiếu cho Họa sĩ", {"to": "artist"})
+        self.completed(
+            state,
+            f"Đã khóa phong cách và {len(bible.get('characters', []))} mô tả nhân vật cố định",
+        )
+        if self.direct_approval_stage(state):
+            self.event(
+                state, "waiting_for_user_approval",
+                "Hồ sơ nhân vật và ảnh tham chiếu đã hoàn thành, được chuyển thẳng đến bạn duyệt.",
+                {"to": "user", "approval_stage": "character_design"},
+            )
+        else:
+            self.event(
+                state, "handoff",
+                "Thiết kế đã được kiểm tra; bàn giao hồ sơ và ảnh tham chiếu cho Họa sĩ",
+                {"to": "artist"},
+            )
         return {
             **state, "character_bible": bible, "stage": "illustration", "feedback": "",
             "model_usage": [*state.get("model_usage", []), usage],

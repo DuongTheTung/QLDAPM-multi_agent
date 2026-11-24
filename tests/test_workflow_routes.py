@@ -1,4 +1,6 @@
+from backend.app.agents.base import BaseAgent
 from backend.app.agents.pm import PMAgent
+from backend.app.agents.reviewer import ReviewerAgent
 from backend.app.db import Database
 from backend.app.workflow import ComicWorkflow
 
@@ -79,6 +81,108 @@ def test_optional_approval_gate_is_versioned_and_persisted(tmp_path):
 
     database.resolve_approval("project-1", approval["id"], "approved")
     assert workflow._request_approval(database.get_project("project-1"), state) is False
+
+
+async def test_selected_human_approval_skips_automatic_unit_review(tmp_path):
+    class WriterForTest(BaseAgent):
+        agent_id = "writer"
+        display_name = "Biên kịch"
+
+    database = Database(tmp_path / "direct-human-approval.db")
+    database.init()
+    database.create_project("project-1", "Test", "A sufficiently detailed comic prompt")
+    database.update_project(
+        "project-1", approval_enabled=True, approval_stages=["script"],
+    )
+    agent = WriterForTest(database, object(), tmp_path)
+
+    result = await agent.quality_gate(
+        {"project_id": "project-1"}, "writer_pages", "Kịch bản phân trang",
+        content={"pages": []},
+    )
+
+    assert result["verdict"] == "PASS"
+    assert database.list_quality_tests("project-1") == []
+    event = database.get_events("project-1")[-1]
+    assert event["event_type"] == "waiting_for_user_approval"
+    assert "chuyển thẳng đến bạn duyệt" in event["message"]
+
+
+async def test_unselected_stage_is_sent_to_reviewer_immediately(tmp_path):
+    class WriterForTest(BaseAgent):
+        agent_id = "writer"
+        display_name = "Biên kịch"
+
+    class ReviewerForTest:
+        called = False
+
+        async def inspect_unit(self, *_args, **_kwargs):
+            self.called = True
+            return {"verdict": "PASS", "serious_issues": [], "notes": []}
+
+    database = Database(tmp_path / "automatic-review.db")
+    database.init()
+    database.create_project("project-1", "Test", "A sufficiently detailed comic prompt")
+    database.update_project(
+        "project-1", approval_enabled=True,
+        approval_stages=["character_design", "illustration", "final"],
+    )
+    agent = WriterForTest(database, object(), tmp_path)
+    reviewer = ReviewerForTest()
+    agent.reviewer = reviewer
+
+    result = await agent.quality_gate(
+        {"project_id": "project-1"}, "writer_pages", "Kịch bản phân trang",
+        content={"pages": []},
+    )
+
+    assert result["verdict"] == "PASS"
+    assert reviewer.called is True
+    assert not any(
+        event["event_type"] == "waiting_for_user_approval"
+        for event in database.get_events("project-1")
+    )
+
+
+def test_reviewer_cannot_return_a_human_approved_stage():
+    review = {
+        "verdict": "REVISE",
+        "summary": "Đề nghị thiết kế lại",
+        "serious_issues": [{"category": "style", "reason": "test"}],
+        "minor_notes": [],
+        "revision_agent": "designer",
+        "revision_instructions": "Làm lại thiết kế",
+    }
+
+    protected = ReviewerAgent._protect_human_approvals(
+        review, {"character_design"},
+    )
+
+    assert protected["verdict"] == "PASS"
+    assert protected["revision_agent"] == "none"
+    assert protected["serious_issues"] == []
+    assert "người dùng duyệt" in protected["minor_notes"][-1]
+
+
+async def test_human_approved_illustration_bypasses_aggregate_reviewer(tmp_path):
+    database = Database(tmp_path / "approved-illustration.db")
+    database.init()
+    database.create_project("project-1", "Test", "A sufficiently detailed comic prompt")
+    approval = database.create_approval(
+        "project-1", "illustration", "illustration:v1", {"page_images": ["page-1.png"]},
+    )
+    database.resolve_approval("project-1", approval["id"], "approved")
+    reviewer = ReviewerAgent(
+        database, object(), tmp_path, layout=object(), settings=object(),
+    )
+
+    result = await reviewer.run({"project_id": "project-1", "stage": "testing"})
+
+    assert result["stage"] == "layout"
+    assert result["review"]["human_approved"] is True
+    events = database.get_events("project-1")
+    assert events[-1]["event_type"] == "automatic_review_skipped"
+    assert not any(event["event_type"] == "agent_started" for event in events)
 
 
 async def test_workflow_honors_pause_at_next_safe_snapshot(tmp_path):

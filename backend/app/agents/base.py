@@ -45,6 +45,39 @@ class BaseAgent:
         self.db.set_task_step(state["project_id"], self.agent_id, step_key)
         self.event(state, "subtask_started", message, {"step_key": step_key})
 
+    def progress(
+        self, state: ComicState, value: int, *, owner: str | None = None,
+        reset: bool = False,
+    ) -> None:
+        self.db.set_agent_progress(
+            state["project_id"], owner or self.agent_id, value, reset=reset,
+        )
+
+    def direct_approval_stage(self, state: ComicState) -> str | None:
+        approval_stage = {
+            "writer": "script",
+            "designer": "character_design",
+            "artist": "illustration",
+            "editor": "final",
+        }.get(self.agent_id)
+        if not approval_stage:
+            return None
+        project = self.db.get_project(state["project_id"])
+        if (
+            project
+            and project.get("approval_enabled")
+            and approval_stage in project.get("approval_stages", [])
+        ):
+            return approval_stage
+        return None
+
+    def human_approved_stages(self, state: ComicState) -> set[str]:
+        """Return stages whose latest human decision is approval."""
+        latest: dict[str, str] = {}
+        for approval in self.db.list_approvals(state["project_id"]):
+            latest[str(approval["stage"])] = str(approval["status"])
+        return {stage for stage, status in latest.items() if status == "approved"}
+
     async def quality_gate(
         self,
         state: ComicState,
@@ -56,6 +89,20 @@ class BaseAgent:
         artifact_ids: list[int] | None = None,
         owner: str | None = None,
     ) -> dict[str, Any]:
+        approval_stage = self.direct_approval_stage(state)
+        if approval_stage:
+            output_owner = owner or self.agent_id
+            self.db.add_event(
+                state["project_id"], output_owner, "waiting_for_user_approval",
+                f"{title} sẽ được chuyển thẳng đến bạn duyệt, không qua Kiểm duyệt tự động trước.",
+                {"approval_stage": approval_stage, "unit_key": step_key},
+            )
+            return {
+                "verdict": "PASS",
+                "summary": "Đầu ra được dành cho người dùng duyệt trực tiếp.",
+                "serious_issues": [],
+                "notes": ["Đã bỏ qua Kiểm duyệt tự động trước bước duyệt của người dùng."],
+            }
         if step_key in state.get("review_bypass", []):
             bypass_owner = owner or self.agent_id
             self.db.finish_task_testing(

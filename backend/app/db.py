@@ -170,6 +170,7 @@ class Database:
             self._ensure_column(db, "project_agents", "image_model", "TEXT")
             self._ensure_column(db, "project_agents", "temperature", "REAL")
             self._ensure_column(db, "project_agents", "role_key", "TEXT")
+            self._ensure_column(db, "project_agents", "progress", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(db, "tasks", "parent_id", "TEXT")
             self._ensure_column(db, "tasks", "item_type", "TEXT NOT NULL DEFAULT 'task'")
             self._ensure_column(db, "tasks", "step_key", "TEXT NOT NULL DEFAULT ''")
@@ -453,9 +454,35 @@ class Database:
                 "WHERE project_id=? AND agent=?",
                 (status, detail, detail, project_id, agent),
             )
+            if status == "done":
+                self._set_agent_progress(db, project_id, agent, 100, allow_decrease=False)
+            elif status == "in_progress":
+                self._set_agent_progress(db, project_id, agent, 5, allow_decrease=False)
+
+    @staticmethod
+    def _set_agent_progress(
+        db: sqlite3.Connection, project_id: str, agent: str, progress: int,
+        *, allow_decrease: bool,
+    ) -> None:
+        value = max(0, min(100, int(progress)))
+        expression = "?" if allow_decrease else "MAX(progress, ?)"
+        db.execute(
+            f"UPDATE project_agents SET progress={expression} WHERE project_id=? "
+            "AND (id=? OR (is_core=1 AND role_key=?))",
+            (value, project_id, agent, agent),
+        )
+
+    def set_agent_progress(
+        self, project_id: str, agent: str, progress: int, *, reset: bool = False,
+    ) -> None:
+        with self._lock, self.connect() as db:
+            self._set_agent_progress(
+                db, project_id, agent, progress, allow_decrease=reset,
+            )
 
     def start_agent_work(self, project_id: str, agent: str) -> None:
         with self._lock, self.connect() as db:
+            self._set_agent_progress(db, project_id, agent, 3, allow_decrease=True)
             parent = db.execute(
                 "SELECT id FROM tasks WHERE project_id=? AND agent=? AND item_type='task' "
                 "AND status!='done' ORDER BY order_index LIMIT 1",
@@ -499,6 +526,7 @@ class Database:
                 "AND status IN ('todo','in_progress')",
                 (project_id, agent),
             )
+            self._set_agent_progress(db, project_id, agent, 100, allow_decrease=False)
 
     def begin_task_testing(self, project_id: str, agent: str, step_key: str) -> None:
         with self._lock, self.connect() as db:

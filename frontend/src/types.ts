@@ -25,6 +25,7 @@ export interface ProjectAgent {
   id: string; key: string; project_id: string; name: string; role: string; instructions: string
   color: string; is_core: boolean; enabled: boolean; created_at: string
   role_key: AgentId
+  progress: number
   model?: string; fallback_models: string[]; image_model?: string; temperature?: number
 }
 

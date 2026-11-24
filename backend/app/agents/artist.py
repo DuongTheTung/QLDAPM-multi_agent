@@ -60,6 +60,7 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             )
             prompt_pack = self._deterministic_prompt_pack(state)
             usage = {"model": "deterministic-artist-recovery", "prompt_tokens": 0, "completion_tokens": 0}
+        self.progress(state, 15)
         expected = state["plan"]["page_count"]
         page_prompts = prompt_pack.get("pages", [])
         if len(page_prompts) != expected:
@@ -70,8 +71,11 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             state, "artist_prompts", "Bộ prompt minh họa", content=prompt_pack,
         )
         self.revise_if_needed(state, prompt_test, "artist_prompts")
+        self.progress(state, 22)
         art_dir = self.project_dir(state) / "raw-art"
         workers = self.role_workers(state)
+        for worker in workers[1:]:
+            self.progress(state, 3, owner=str(worker["runtime_id"]), reset=True)
         lead = workers[0]
         _, _, lead_image_model = self.worker_model_config(state, lead, 0.35)
 
@@ -79,16 +83,18 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             self.worker_event(state, worker, "warning", message)
 
         self.step(state, "artist_cover", "Họa sĩ đang tạo ảnh bìa")
+        self.progress(state, 26)
         cover = await self.images.generate(
             prompt_pack["cover"]["prompt"], art_dir / "cover.png",
             on_warning=lambda message: warning(lead, message), model=lead_image_model,
         )
+        self.progress(state, 33)
         cover_id = self.db.add_artifact(
             state["project_id"], lead["runtime_id"], "cover_raw", "Bìa thô", str(cover),
         )
         self.worker_event(
             state, lead, "unit_completed",
-            f"{lead['name']} hoàn thành ảnh bìa; chuyển sang Testing",
+            f"{lead['name']} hoàn thành ảnh bìa",
             {"unit_key": "artist_cover", "artifact_ids": [cover_id], "content": prompt_pack["cover"]},
         )
         cover_test = await self.quality_gate(
@@ -96,7 +102,13 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             image_path=cover, artifact_ids=[cover_id],
         )
         self.revise_if_needed(state, cover_test, "artist_cover")
+        self.progress(state, 38)
         self.step(state, "artist_pages", f"Đang chia {expected} trang cho {len(workers)} Họa sĩ")
+        worker_totals = {str(worker["runtime_id"]): 0 for worker in workers}
+        worker_done = {str(worker["runtime_id"]): 0 for worker in workers}
+        for index, _item in enumerate(page_prompts, start=1):
+            worker_id = str(workers[(index - 1) % len(workers)]["runtime_id"])
+            worker_totals[worker_id] += 1
         semaphore = asyncio.Semaphore(min(4, len(workers)))
         worker_locks = {
             str(worker["runtime_id"]): asyncio.Semaphore(1) for worker in workers
@@ -106,6 +118,12 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             worker_id = str(worker["runtime_id"])
             step_key = self.worker_step_key(worker, "artist_pages")
             self.db.set_task_status(state["project_id"], worker_id, "in_progress")
+            base = 38 if worker.get("is_core") else 5
+            total = max(1, worker_totals[worker_id])
+            self.progress(
+                state, round(base + (96 - base) * (worker_done[worker_id] + 0.12) / total),
+                owner=worker_id,
+            )
             self.worker_event(
                 state, worker, "page_rendering",
                 f"{worker['name']} đang dựng trang {index}/{expected}", {"page": index},
@@ -116,13 +134,17 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
                     item["prompt"], art_dir / f"page-{index:02d}.png",
                     on_warning=lambda message: warning(worker, message), model=worker_image_model,
                 )
+            self.progress(
+                state, round(base + (96 - base) * (worker_done[worker_id] + 0.72) / total),
+                owner=worker_id,
+            )
             artifact_id = self.db.add_artifact(
                 state["project_id"], worker_id, "page_raw",
                 f"Trang {index} — tranh thô", str(path),
             )
             self.worker_event(
                 state, worker, "unit_completed",
-                f"{worker['name']} hoàn thành ảnh trang {index}; chuyển ngay sang Testing",
+                f"{worker['name']} hoàn thành ảnh trang {index}",
                 {
                     "unit_key": step_key, "page": index,
                     "artifact_ids": [artifact_id], "content": item,
@@ -133,6 +155,11 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
                 image_path=path, artifact_ids=[artifact_id], owner=worker_id,
             )
             self.revise_if_needed(state, page_test, step_key)
+            worker_done[worker_id] += 1
+            self.progress(
+                state, round(base + (96 - base) * worker_done[worker_id] / total),
+                owner=worker_id,
+            )
             return index, str(path)
 
         results = await asyncio.gather(*(
@@ -140,6 +167,7 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
             for index, item in enumerate(page_prompts, start=1)
         ))
         images = [path for _, path in sorted(results)]
+        self.progress(state, 98)
         for worker in workers[1:]:
             self.db.complete_agent_work(state["project_id"], str(worker["runtime_id"]))
             self.worker_event(
@@ -149,7 +177,17 @@ speech bubble trong ảnh. Sao chép nguyên văn style_lock và mọi fixed_anc
         self.db.update_project(state["project_id"], progress=80)
         self.db.update_project(state["project_id"], stage="testing", progress=82)
         self.completed(state, f"Đã dựng bìa và {expected} trang tranh")
-        self.event(state, "handoff", "Họa sĩ bàn giao ảnh đã kiểm từng trang cho Kiểm duyệt", {"to": "reviewer"})
+        if self.direct_approval_stage(state):
+            self.event(
+                state, "waiting_for_user_approval",
+                "Bìa và các trang tranh đã hoàn thành, được chuyển thẳng đến bạn duyệt.",
+                {"to": "user", "approval_stage": "illustration"},
+            )
+        else:
+            self.event(
+                state, "handoff", "Họa sĩ bàn giao bìa và các trang tranh cho Kiểm duyệt",
+                {"to": "reviewer"},
+            )
         return {
             **state, "page_prompts": page_prompts, "page_images": images,
             "cover_image": str(cover), "stage": "testing", "feedback": "",

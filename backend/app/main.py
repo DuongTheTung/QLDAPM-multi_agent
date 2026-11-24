@@ -504,17 +504,53 @@ async def decide_approval(
     if project["status"] != "awaiting_approval" or approval["status"] != "pending":
         raise HTTPException(409, "Yêu cầu duyệt này không còn ở trạng thái chờ")
     state = load_state(project)
+    approval_stage_label = {
+        "script": "kịch bản",
+        "character_design": "thiết kế nhân vật",
+        "illustration": "tranh minh họa",
+        "final": "bản truyện hoàn chỉnh",
+    }[approval["stage"]]
     if request.decision == "approve":
         if not db.resolve_approval(project_id, approval_id, "approved"):
             raise HTTPException(409, "Nội dung đã được xử lý")
+        approved_stages = set(state.get("human_approved_stages", []))
+        approved_stages.add(approval["stage"])
+        state["human_approved_stages"] = sorted(approved_stages)
+        if approval["stage"] == "illustration":
+            state["stage"] = "layout"
+            state["review"] = {
+                "verdict": "PASS",
+                "summary": "Tranh minh họa đã được người dùng duyệt.",
+                "serious_issues": [],
+                "minor_notes": ["Bỏ qua kiểm duyệt tự động và chuyển thẳng sang dàn trang."],
+                "revision_agent": "none",
+                "revision_instructions": "",
+                "human_approved": True,
+            }
+        db.update_project(
+            project_id, stage=state.get("stage", project["stage"]),
+            state_json=json.dumps(state, ensure_ascii=False), error=None,
+        )
         db.add_event(
             project_id, "user", "content_approved",
-            f"Bạn đã duyệt nội dung {approval['stage']}.",
-            {"approval_id": approval_id},
+            (
+                f"Bạn đã duyệt {approval_stage_label}; chuyển thẳng sang dàn trang, "
+                "không qua Kiểm duyệt tự động."
+                if approval["stage"] == "illustration"
+                else f"Bạn đã duyệt {approval_stage_label}; phần này đã được khóa khỏi Kiểm duyệt tự động."
+            ),
+            {
+                "approval_id": approval_id,
+                "approval_stage": approval["stage"],
+                "automatic_review_skipped": True,
+            },
         )
     else:
         if not request.feedback.strip():
             raise HTTPException(422, "Cần nhập yêu cầu chỉnh sửa")
+        approved_stages = set(state.get("human_approved_stages", []))
+        approved_stages.discard(approval["stage"])
+        state["human_approved_stages"] = sorted(approved_stages)
         default_agent = {
             "script": "writer", "character_design": "designer",
             "illustration": "artist", "final": "editor",

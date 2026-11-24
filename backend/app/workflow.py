@@ -167,9 +167,15 @@ class ComicWorkflow:
         if previous:
             return previous["status"] == "pending"
         approval = self.db.create_approval(project["id"], stage, signature, content)
+        stage_label = {
+            "script": "kịch bản",
+            "character_design": "thiết kế nhân vật",
+            "illustration": "tranh minh họa",
+            "final": "bản truyện hoàn chỉnh",
+        }[stage]
         event_id = self.db.add_event(
             project["id"], owner, "approval_requested",
-            f"Nội dung {stage} đang chờ bạn duyệt.",
+            f"{stage_label.capitalize()} đang chờ bạn duyệt.",
             {"approval_id": approval["id"], "approval_stage": stage},
         )
         self.db.link_approval_event(project["id"], approval["id"], event_id)

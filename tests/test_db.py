@@ -88,6 +88,7 @@ def test_agent_steps_keep_parent_and_subtasks_synchronized(tmp_path: Path):
     ])
 
     database.start_agent_work("project-1", "writer")
+    assert database.get_project_agent("project-1", "project-1:writer")["progress"] == 3
     first = {item["id"]: item["status"] for item in database.get_tasks("project-1")}
     assert first == {"TASK": "in_progress", "SUB-1": "in_progress", "SUB-2": "todo"}
 
@@ -97,6 +98,11 @@ def test_agent_steps_keep_parent_and_subtasks_synchronized(tmp_path: Path):
 
     database.complete_agent_work("project-1", "writer")
     assert all(item["status"] == "done" for item in database.get_tasks("project-1"))
+    assert database.get_project_agent("project-1", "project-1:writer")["progress"] == 100
+
+    database.set_agent_progress("project-1", "writer", 45, reset=True)
+    database.set_agent_progress("project-1", "writer", 30)
+    assert database.get_project_agent("project-1", "project-1:writer")["progress"] == 45
 
 
 def test_global_router_settings_are_persisted(tmp_path: Path):

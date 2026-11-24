@@ -42,6 +42,7 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
             on_attempt=self.model_attempt(state),
             models=models,
         )
+        self.progress(state, 55)
         plan["page_count"] = max(4, min(24, int(plan.get("page_count", 8))))
         title = str(plan.get("title") or state.get("title") or "Truyện mới")[:120]
         custom_agents = self.db.list_project_agents(
@@ -49,12 +50,14 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         )
         tasks = self._schedule(state["project_id"], plan["page_count"], custom_agents)
         self.db.replace_tasks(state["project_id"], tasks)
+        self.progress(state, 78)
         self.step(state, "pm_schedule", "PM đang kiểm tra dependency và lịch sản xuất")
-        self.step(state, "pm_handoff", "PM đã đồng bộ lịch, dependency và bàn giao task/subtask")
+        self.step(state, "pm_handoff", "PM đã đồng bộ lịch, quan hệ phụ thuộc và bàn giao công việc")
+        self.progress(state, 95)
         self.db.update_project(state["project_id"], title=title, stage="script", progress=10)
         self.save_json(state, "01-production-plan.json", plan, "plan")
         self.completed(state, f"PM đã khóa brief “{title}” và lập {len(tasks)} work item")
-        self.event(state, "handoff", "PM bàn giao production brief cho Biên kịch", {"to": "writer"})
+        self.event(state, "handoff", "PM bàn giao bản yêu cầu sản xuất cho Biên kịch", {"to": "writer"})
         return {
             **state,
             "title": title,
@@ -125,7 +128,7 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
 
         add_group(
             "PM", "Quản lý và đồng bộ kế hoạch sản xuất", "pm", 0, 15, [],
-            "PM khóa phạm vi, dependency, lịch và theo dõi trạng thái của toàn bộ task/subtask.",
+            "PM khóa phạm vi, quan hệ phụ thuộc, lịch và theo dõi toàn bộ công việc cùng việc nhỏ.",
             [
                 ("01", "Phân tích yêu cầu và khóa phạm vi", "pm_scope"),
                 ("02", "Lập dependency, lịch và tiêu chí nghiệm thu", "pm_schedule"),
@@ -167,7 +170,7 @@ bộ kịch bản. Không yêu cầu người dùng trả lời thêm; hãy tự
         add_group(
             "REVIEW", "Kiểm duyệt tổng thể trước dàn trang", "reviewer",
             art_end, art_end + 25, ["ART"],
-            "Kiểm tra các đầu ra đã qua Testing và trả lỗi nghiêm trọng về đúng agent.",
+            "Kiểm tra các đầu ra và trả lỗi nghiêm trọng về đúng agent.",
             [
                 ("01", "Đối chiếu mạch truyện và an toàn độ tuổi", "reviewer_story"),
                 ("02", "Đối chiếu nhân vật, ảnh và kịch bản", "reviewer_visual"),
